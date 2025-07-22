@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ROS客户端节点模块，处理ROS节点和图像接收
+视频流发布模块，处理机器人图像数据发送到VR端
 """
 
 import rclpy
@@ -9,9 +9,9 @@ from sensor_msgs.msg import Image
 from livekit import rtc
 
 
-class LiveKitClient(Node):
+class VideoStreamPublisher(Node):
     def __init__(self, source: rtc.VideoSource, remote_counter: dict):
-        super().__init__('livekit_image_publisher')
+        super().__init__('video_stream_publisher')
         self.source = source
         self.remote_counter = remote_counter
         

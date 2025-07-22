@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LiveKit发布者模块，处理与LiveKit服务的连接和数据发送/接收
+控制流处理模块，处理VR端控制指令接收和LiveKit房间管理
 """
 
 import json
@@ -8,9 +8,9 @@ import logging
 from livekit import rtc
 
 
-class LiveKitPublisher:
+class ControlStreamHandler:
     def __init__(self, url, token):
-        """Initialize the LiveKit publisher with connection details."""
+        """Initialize the control stream handler with LiveKit connection details."""
         self.url = url
         self.token = token
         self.room = rtc.Room()

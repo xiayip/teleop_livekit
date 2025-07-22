@@ -9,8 +9,8 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 
 # 导入本地模块
-from .livekit_publisher import LiveKitPublisher
-from .livekit_client import LiveKitClient
+from .control_stream_handler import ControlStreamHandler
+from .video_stream_publisher import VideoStreamPublisher
 
 
 async def main():
@@ -29,17 +29,17 @@ async def main():
     
     width, height, fps = video_cfg['color_width'], video_cfg['color_height'], video_cfg['color_fps']
 
-    # Initialize and connect LiveKit publisher
-    publisher = LiveKitPublisher(livekit_cfg['url'], livekit_cfg['token'])
-    await publisher.connect()
-    source = await publisher.publish_video_track(width, height, fps)
+    # Initialize and connect control stream handler
+    control_handler = ControlStreamHandler(livekit_cfg['url'], livekit_cfg['token'])
+    await control_handler.connect()
+    source = await control_handler.publish_video_track(width, height, fps)
 
-    # Initialize ROS node
+    # Initialize ROS node for video streaming
     rclpy.init()
-    ros_node = LiveKitClient(source, publisher.remote_counter)
+    ros_node = VideoStreamPublisher(source, control_handler.remote_counter)
     
     # Register message handlers for all supported topics
-    publisher.register_handlers_from_node(ros_node)
+    control_handler.register_handlers_from_node(ros_node)
     
     def ros_spin():
         rclpy.spin(ros_node)
@@ -55,7 +55,7 @@ async def main():
     # Clean up
     ros_node.destroy_node()
     rclpy.shutdown()
-    await publisher.disconnect()
+    await control_handler.disconnect()
 
 
 def run():
