@@ -12,6 +12,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/orbbec.yaml']),
         ('share/' + package_name + '/config', ['config/livekit.yaml']),
+        ('share/' + package_name + '/config', ['config/camera.yaml']),
         ('share/' + package_name + '/launch', ['launch/teleop_livekit.launch.py']),
     ],
     install_requires=['setuptools'],
