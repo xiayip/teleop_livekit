@@ -43,4 +43,7 @@ def generate_launch_description():
         ]
     )
 
+    # donot launch camera if on x86 architecture
+    if os.uname().machine == 'x86_64':
+        return launch.LaunchDescription([livekit_node])
     return (launch.LaunchDescription([container] + [livekit_node]))

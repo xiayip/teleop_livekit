@@ -16,7 +16,7 @@ class ControlStreamHandler:
         self.room = rtc.Room()
         self.remote_counter = {"count": 0}
         self.source = None
-        self.message_handlers = {}
+        self.message_manager = None
         
     async def connect(self):
         """Connect to the LiveKit room and set up event handlers."""
@@ -24,20 +24,22 @@ class ControlStreamHandler:
         logging.info("Connected to LiveKit room: [%s]", self.room.name)
         self._setup_event_handlers()
     
-    def register_handler(self, topic, handler):
-        """Register a message handler for a specific topic."""
-        self.message_handlers[topic] = handler
-        logging.info(f"Registered handler for topic: {topic}")
+    def setup_message_handlers(self, ros_node):
+        """Set up message handlers with their individual publishing strategies."""
+        from .message_handlers import MessageHandlerFactory
+        
+        # Create manager with all handlers (each with their own timing)
+        self.message_manager = MessageHandlerFactory.create_manager_with_handlers(ros_node)
+        
+        # Log handler configuration
+        handler_info = self.message_manager.get_handler_info()
+        for topic, info in handler_info.items():
+            rate_info = f" at {info['rate']} Hz" if info['rate'] else " (immediate)"
+            logging.info(f"Configured {topic}: {info['type']}{rate_info}")
     
     def register_handlers_from_node(self, ros_node):
         """Register all available message handlers from a ROS node."""
-        from .message_handlers import MessageHandlerFactory
-        # Register standard handlers
-        topics = ["ee_pose", "velocity", "motion_command"]
-        for topic in topics:
-            handler = MessageHandlerFactory.create_handler(topic, ros_node)
-            if handler:
-                self.register_handler(topic, handler)
+        self.setup_message_handlers(ros_node)
     
     def _setup_event_handlers(self):
         """Set up handlers for participant connect/disconnect events."""
@@ -62,18 +64,16 @@ class ControlStreamHandler:
             logging.info("received data from %s topic %s: %s", data.participant.identity, 
                         data.topic, data.data)
                         
-            # 使用注册的处理器处理消息
-            handler = self.message_handlers.get(data.topic)
-            if handler:
+            if self.message_manager:
                 try:
                     data_dict = json.loads(data.data.decode('utf-8'))
-                    handler.process(data_dict)
+                    self.message_manager.process_message(data.topic, data_dict)
                 except json.JSONDecodeError:
                     logging.error("Failed to decode JSON data: %s", data.data.decode('utf-8'))
                 except Exception as e:
                     logging.error(f"Error processing message on topic {data.topic}: {e}")
             else:
-                logging.warning(f"No handler registered for topic: {data.topic}")
+                logging.warning("Message manager not initialized")
     
     def create_video_source(self, width, height):
         """Create a video source with the specified dimensions."""
@@ -96,6 +96,11 @@ class ControlStreamHandler:
         return self.source
     
     async def disconnect(self):
-        """Disconnect from the LiveKit room."""
+        """Disconnect from the LiveKit room and stop all message handlers."""
+        # Stop message handlers first
+        if self.message_manager:
+            self.message_manager.stop_all()
+            
+        # Then disconnect from room
         await self.room.disconnect()
-        logging.info("Disconnected from LiveKit room")
+        logging.info("Disconnected from LiveKit room and stopped all message handlers")

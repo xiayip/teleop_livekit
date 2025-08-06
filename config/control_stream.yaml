@@ -1,0 +1,34 @@
+# Control stream configuration - Individual handler rates
+control_stream:
+  # Maximum age for cached data before it's considered stale (seconds)
+  max_data_age_seconds: 1.0
+  
+  # Enable debug logging for message publishing
+  debug_logging: false
+
+# Topic-specific settings with individual publishing rates
+topics:
+  ee_pose:
+    enabled: true
+    topic_name: "/ee_pose"
+    publish_rate_hz: 50.0  # High frequency for precise end-effector control
+    handler_type: "TimedMessageHandler"
+    description: "End-effector pose commands"
+  
+  velocity:
+    enabled: true
+    topic_name: "/cmd_vel"
+    publish_rate_hz: 30.0  # Medium frequency for responsive velocity control
+    handler_type: "TimedMessageHandler" 
+    description: "Velocity commands"
+  
+  motion_command:
+    enabled: true
+    handler_type: "ImmediateMessageHandler"
+    description: "Discrete motion commands - executed immediately"
+    # No publish_rate_hz - executed immediately via service/action calls
+
+# Handler type explanations:
+# - TimedMessageHandler: Uses ROS timer for periodic publishing at specified rate
+# - ImmediateMessageHandler: Executes commands immediately (service calls, actions)
+# - AsyncMessageHandler: For future use with async operations

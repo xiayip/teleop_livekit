@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
 消息处理器模块，包含从LiveKit接收的消息的处理器类
+采用缓存+定时发布模式，避免在LiveKit回调中直接发布消息
 """
 
 from abc import ABC, abstractmethod
+import threading
+import time
 import rclpy
 from rclpy.action import ActionClient
 from geometry_msgs.msg import PoseStamped, Twist
@@ -12,36 +15,149 @@ from moveit_msgs.action import MoveGroup
 
 
 class MessageHandler(ABC):
-    """Base abstract class for handling messages from LiveKit."""
+    """Base abstract class for handling messages from LiveKit.
+    
+    1. process() 方法只缓存数据，不直接发布
+    2. 每种类型的Handler有自己的发布策略
+    3. 支持不同的发布模式：定时发布、立即执行、异步处理
+    """
     
     def __init__(self, ros_node):
         """Initialize with a ROS node for publishing."""
         self.ros_node = ros_node
+        self._cached_data = None
+        self._data_lock = threading.RLock()
+        self._last_update_time = 0
+        self.publish_mode = "immediate"  # "timer", "immediate", "async"
     
     @abstractmethod
     def process(self, data_dict):
-        """Process the data dictionary and perform appropriate actions."""
+        """Process and cache the data dictionary."""
+        pass
+    
+    def has_new_data(self, max_age_seconds=1.0):
+        """Check if there's new data within the specified age."""
+        with self._data_lock:
+            if self._cached_data is None:
+                return False
+            return (time.time() - self._last_update_time) < max_age_seconds
+    
+    def get_publish_mode(self):
+        """Get the publishing mode for this handler."""
+        return self.publish_mode
+
+
+class TimedMessageHandler(MessageHandler):
+    """Base class for handlers that need timed publishing (Pose, Twist, etc.)."""
+    
+    def __init__(self, ros_node, publish_rate_hz=30.0):
+        """Initialize with a ROS node and create a timer for publishing."""
+        super().__init__(ros_node)
+        self.publish_mode = "timer"
+        self.publish_rate_hz = publish_rate_hz
+        self.timer = None
+        self.is_running = False
+        
+    @abstractmethod
+    def get_cached_message(self):
+        """Get the latest cached message for publishing. Returns None if no data."""
+        pass
+    
+    @abstractmethod
+    def publish_cached_message(self):
+        """Publish the cached message if available."""
+        pass
+        
+    def start_publishing(self):
+        """Start the periodic publishing timer."""
+        if self.is_running:
+            self.ros_node.get_logger().warning(f"Timer already running for {self.__class__.__name__}")
+            return
+        
+        timer_period = 1.0 / self.publish_rate_hz
+        self.timer = self.ros_node.create_timer(timer_period, self._publish_callback)
+        self.is_running = True
+        
+        self.ros_node.get_logger().info(f"Started {self.__class__.__name__} timer at {self.publish_rate_hz} Hz")
+    
+    def stop_publishing(self):
+        """Stop the periodic publishing timer."""
+        if self.timer is not None:
+            self.timer.destroy()
+            self.timer = None
+            
+        self.is_running = False
+        self.ros_node.get_logger().info(f"Stopped {self.__class__.__name__} timer")
+    
+    def _publish_callback(self):
+        """Timer callback to publish cached messages."""
+        try:
+            # Only publish if there's recent data
+            if self.has_new_data(max_age_seconds=1.0):
+                self.publish_cached_message()
+        except Exception as e:
+            self.ros_node.get_logger().error(f"Error in {self.__class__.__name__} publishing: {e}")
+
+
+class ImmediateMessageHandler(MessageHandler):
+    """Base class for handlers that execute immediately (Service calls, discrete actions)."""
+    
+    def __init__(self, ros_node):
+        """Initialize with immediate execution mode."""
+        super().__init__(ros_node)
+        self.publish_mode = "immediate"
+    
+    def process(self, data_dict):
+        """Process data and execute immediately."""
+        with self._data_lock:
+            self._cached_data = data_dict.copy()
+            self._last_update_time = time.time()
+        
+        # Execute immediately
+        self.execute_command(data_dict)
+    
+    @abstractmethod
+    def execute_command(self, data_dict):
+        """Execute the command immediately."""
         pass
 
 
-class PoseMessageHandler(MessageHandler):
-    """Handler for pose messages from LiveKit."""
+class PoseMessageHandler(TimedMessageHandler):
+    """Handler for pose messages from LiveKit. Uses high-frequency timed publishing (50Hz)."""
     
-    def __init__(self, ros_node):
-        """Initialize with a ROS node and create a pose publisher."""
-        super().__init__(ros_node)
+    def __init__(self, ros_node, publish_rate_hz=50.0):
+        """Initialize with a ROS node and create a pose publisher with 50Hz rate."""
+        super().__init__(ros_node, publish_rate_hz)
         self.publisher = ros_node.create_publisher(PoseStamped, '/ee_pose', 10)
     
     def process(self, data_dict):
-        """Process pose data and publish a PoseStamped message."""
-        position = data_dict.get("position", {})
-        rotation = data_dict.get("rotation", {})
-        timestamp = data_dict.get("timestamp", 0)
+        """Process and cache pose data."""
+        with self._data_lock:
+            self._cached_data = data_dict.copy()
+            self._last_update_time = time.time()
         
-        pose_msg = self._convert_to_pose_stamped(position, rotation, timestamp)
-        self.publisher.publish(pose_msg)
-        self.ros_node.get_logger().debug(f"Published pose: {pose_msg.pose.position}")
-        return pose_msg
+        self.ros_node.get_logger().debug(f"Cached pose data: {data_dict.get('position', {})}")
+    
+    def get_cached_message(self):
+        """Get the latest cached pose message."""
+        with self._data_lock:
+            if self._cached_data is None:
+                return None
+            
+            position = self._cached_data.get("position", {})
+            rotation = self._cached_data.get("rotation", {})
+            timestamp = self._cached_data.get("timestamp", time.time())
+            
+            return self._convert_to_pose_stamped(position, rotation, timestamp)
+    
+    def publish_cached_message(self):
+        """Publish the cached pose message if available."""
+        msg = self.get_cached_message()
+        if msg is not None:
+            self.publisher.publish(msg)
+            self.ros_node.get_logger().debug(f"Published cached pose: {msg.pose.position}")
+            return True
+        return False
     
     def _convert_to_pose_stamped(self, position, rotation, timestamp):
         """Convert position and rotation data to ROS PoseStamped message."""
@@ -65,28 +181,46 @@ class PoseMessageHandler(MessageHandler):
         return pose_msg
 
 
-class TwistMessageHandler(MessageHandler):
-    """Handler for twist/velocity messages from LiveKit."""
+class TwistMessageHandler(TimedMessageHandler):
+    """Handler for twist/velocity messages from LiveKit. Uses medium-frequency timed publishing (30Hz)."""
     
-    def __init__(self, ros_node):
-        """Initialize with a ROS node and create a twist publisher."""
-        super().__init__(ros_node)
+    def __init__(self, ros_node, publish_rate_hz=30.0):
+        """Initialize with a ROS node and create a twist publisher with 30Hz rate."""
+        super().__init__(ros_node, publish_rate_hz)
         self.publisher = ros_node.create_publisher(Twist, '/cmd_vel', 10)
     
     def process(self, data_dict):
-        """Process velocity data and publish a Twist message."""
-        linear_velocity = data_dict.get("linear", {})
-        angular_velocity = data_dict.get("angular", {})
-        
-        if linear_velocity is None:
-            linear_velocity = {}
-        if angular_velocity is None:
-            angular_velocity = {}
+        """Process and cache velocity data."""
+        with self._data_lock:
+            self._cached_data = data_dict.copy()
+            self._last_update_time = time.time()
             
-        twist_msg = self._convert_to_twist(linear_velocity, angular_velocity)
-        self.publisher.publish(twist_msg)
-        self.ros_node.get_logger().debug(f"Published twist: {twist_msg.linear}")
-        return twist_msg
+        self.ros_node.get_logger().debug(f"Cached twist data: {data_dict.get('linear', {})}")
+    
+    def get_cached_message(self):
+        """Get the latest cached twist message."""
+        with self._data_lock:
+            if self._cached_data is None:
+                return None
+                
+            linear_velocity = self._cached_data.get("linear", {})
+            angular_velocity = self._cached_data.get("angular", {})
+            
+            if linear_velocity is None:
+                linear_velocity = {}
+            if angular_velocity is None:
+                angular_velocity = {}
+                
+            return self._convert_to_twist(linear_velocity, angular_velocity)
+    
+    def publish_cached_message(self):
+        """Publish the cached twist message if available."""
+        msg = self.get_cached_message()
+        if msg is not None:
+            self.publisher.publish(msg)
+            self.ros_node.get_logger().debug(f"Published cached twist: {msg.linear}")
+            return True
+        return False
     
     def _convert_to_twist(self, linear_velocity, angular_velocity):
         """Convert velocity data to ROS Twist message."""
@@ -105,20 +239,28 @@ class TwistMessageHandler(MessageHandler):
         return twist_msg
 
 
-class MotionCommandHandler(MessageHandler):
-    """Handler for motion command messages from LiveKit."""
+class MotionCommandHandler(ImmediateMessageHandler):
+    """Handler for motion command messages from LiveKit. 
+    
+    Uses immediate execution for discrete actions like service calls and action requests.
+    """
     
     def __init__(self, ros_node):
         """Initialize with a ROS node and create an action client."""
         super().__init__(ros_node)
         self.move_group_client = ActionClient(ros_node, MoveGroup, '/move_action')
     
-    def process(self, data_dict):
-        """Process motion command data and take appropriate action."""
-        if data_dict.get("arm_motion") == "arm_ready_to_pick":
-            self.ros_node.get_logger().info("Initiating arm_ready_to_pick motion")
+    def execute_command(self, data_dict):
+        """Execute the motion command immediately."""
+        command_type = data_dict.get("arm_motion")
+        
+        if command_type == "arm_ready_to_pick":
+            self.ros_node.get_logger().info("Executing arm_ready_to_pick motion immediately")
             self._send_move_group_goal()
-        return data_dict
+        elif command_type:
+            self.ros_node.get_logger().warning(f"Unknown motion command: {command_type}")
+        
+        self.ros_node.get_logger().debug(f"Executed motion command: {data_dict}")
     
     def _send_move_group_goal(self):
         """Send a MoveGroup action goal."""
@@ -157,6 +299,66 @@ class MotionCommandHandler(MessageHandler):
         self.ros_node.get_logger().info(f'MoveGroup action completed with result: {result}')
 
 
+class MessageHandlerManager:
+    """
+    消息处理管理器 - 为不同类型的Handler提供独立的发布策略
+    
+    支持三种发布模式：
+    1. Timer模式：高频连续数据 (Pose: 50Hz, Twist: 30Hz)  
+    2. Immediate模式：离散命令立即执行 (MotionCommand)
+    3. Async模式：异步处理 (未来扩展用)
+    """
+    
+    def __init__(self, ros_node):
+        """Initialize the message handler manager."""
+        self.ros_node = ros_node
+        self.handlers = {}
+        self.timer_handlers = []  # Track handlers that need timers
+        
+    def register_handler(self, topic, handler):
+        """Register a message handler with appropriate management strategy."""
+        if not isinstance(handler, MessageHandler):
+            raise ValueError("Handler must be a MessageHandler instance")
+        
+        self.handlers[topic] = handler
+        
+        # Start timer for TimedMessageHandler instances
+        if isinstance(handler, TimedMessageHandler):
+            handler.start_publishing()
+            self.timer_handlers.append(handler)
+            self.ros_node.get_logger().info(f"Registered timed handler for {topic} at {handler.publish_rate_hz} Hz")
+        else:
+            self.ros_node.get_logger().info(f"Registered immediate handler for {topic}")
+    
+    def process_message(self, topic, data_dict):
+        """Process a message for the given topic."""
+        handler = self.handlers.get(topic)
+        if handler:
+            handler.process(data_dict)
+            return True
+        else:
+            self.ros_node.get_logger().warning(f"No handler registered for topic: {topic}")
+            return False
+    
+    def stop_all(self):
+        """Stop all timer-based handlers."""
+        for handler in self.timer_handlers:
+            handler.stop_publishing()
+        
+        self.ros_node.get_logger().info("Stopped all message handlers")
+    
+    def get_handler_info(self):
+        """Get information about all registered handlers."""
+        info = {}
+        for topic, handler in self.handlers.items():
+            info[topic] = {
+                'type': handler.__class__.__name__,
+                'mode': handler.get_publish_mode(),
+                'rate': getattr(handler, 'publish_rate_hz', None)
+            }
+        return info
+
+
 class MessageHandlerFactory:
     """Factory for creating appropriate message handlers based on topic."""
     
@@ -164,10 +366,54 @@ class MessageHandlerFactory:
     def create_handler(topic, ros_node):
         """Create and return an appropriate handler for the given topic."""
         if topic == "ee_pose":
-            return PoseMessageHandler(ros_node)
+            return PoseMessageHandler(ros_node, publish_rate_hz=50.0)  # High freq for pose
         elif topic == "velocity":
-            return TwistMessageHandler(ros_node)
+            return TwistMessageHandler(ros_node, publish_rate_hz=30.0)  # Medium freq for velocity
         elif topic == "motion_command":
-            return MotionCommandHandler(ros_node)
+            return MotionCommandHandler(ros_node)  # Immediate execution
         else:
             return None
+    
+    @staticmethod
+    def create_manager_with_handlers(ros_node, topics=None):
+        """Create a MessageHandlerManager with all standard handlers registered.
+        
+        Args:
+            ros_node: The ROS node instance
+            topics: List of topics to register. If None, registers all standard topics.
+        
+        Returns:
+            MessageHandlerManager instance with handlers registered
+        """
+        if topics is None:
+            topics = ["ee_pose", "velocity", "motion_command"]
+            
+        manager = MessageHandlerManager(ros_node)
+        
+        for topic in topics:
+            handler = MessageHandlerFactory.create_handler(topic, ros_node)
+            if handler:
+                manager.register_handler(topic, handler)
+                
+        return manager
+    
+    @staticmethod
+    def get_handler_config():
+        """Get the configuration for all handler types."""
+        return {
+            "ee_pose": {
+                "type": "TimedMessageHandler", 
+                "publish_rate_hz": 50.0,
+                "description": "End-effector pose - high frequency for smooth control"
+            },
+            "velocity": {
+                "type": "TimedMessageHandler",
+                "publish_rate_hz": 30.0, 
+                "description": "Velocity commands - medium frequency for responsive control"
+            },
+            "motion_command": {
+                "type": "ImmediateMessageHandler",
+                "publish_rate_hz": None,
+                "description": "Discrete motion commands - immediate execution"
+            }
+        }
