@@ -165,7 +165,7 @@ class PoseMessageHandler(TimedMessageHandler):
         # Set header
         pose_msg.header = Header()
         pose_msg.header.stamp = rclpy.time.Time(nanoseconds=int(timestamp * 1e6)).to_msg()
-        pose_msg.header.frame_id = "livekit_frame"
+        pose_msg.header.frame_id = "link_grasp_center"  # Use a more descriptive frame ID
         
         # Set position
         pose_msg.pose.position.x = float(position.get("x", 0.0))
