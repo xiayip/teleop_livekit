@@ -10,7 +10,7 @@ control_stream:
 topics:
   ee_pose:
     enabled: true
-    topic_name: "/ee_pose"
+    topic_name: "/servo_node/pose_target_cmds"
     publish_rate_hz: 50.0  # High frequency for precise end-effector control
     handler_type: "TimedMessageHandler"
     description: "End-effector pose commands"

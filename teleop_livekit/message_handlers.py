@@ -128,8 +128,8 @@ class PoseMessageHandler(TimedMessageHandler):
     def __init__(self, ros_node, publish_rate_hz=50.0):
         """Initialize with a ROS node and create a pose publisher with 50Hz rate."""
         super().__init__(ros_node, publish_rate_hz)
-        self.publisher = ros_node.create_publisher(PoseStamped, '/ee_pose', 10)
-    
+        self.publisher = ros_node.create_publisher(PoseStamped, '/servo_node/pose_target_cmds', 10)
+
     def process(self, data_dict):
         """Process and cache pose data."""
         with self._data_lock:
