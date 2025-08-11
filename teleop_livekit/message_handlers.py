@@ -9,10 +9,12 @@ import threading
 import time
 import rclpy
 from rclpy.action import ActionClient
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, Pose
 from std_msgs.msg import Header
 from moveit_msgs.action import MoveGroup
-
+from tf2_ros import Buffer, TransformListener
+from rclpy.duration import Duration
+from tf2_geometry_msgs import do_transform_pose
 
 class MessageHandler(ABC):
     """Base abstract class for handling messages from LiveKit.
@@ -123,61 +125,101 @@ class ImmediateMessageHandler(MessageHandler):
 
 
 class PoseMessageHandler(TimedMessageHandler):
-    """Handler for pose messages from LiveKit. Uses high-frequency timed publishing (50Hz)."""
-    
-    def __init__(self, ros_node, publish_rate_hz=50.0):
-        """Initialize with a ROS node and create a pose publisher with 50Hz rate."""
+    """Handler for pose messages from LiveKit. Uses high-frequency timed publishing (30Hz)."""
+
+    def __init__(self, ros_node, publish_rate_hz=30.0):
+        """Initialize with a ROS node and create a pose publisher with 30Hz rate."""
         super().__init__(ros_node, publish_rate_hz)
         self.publisher = ros_node.create_publisher(PoseStamped, '/servo_node/pose_target_cmds', 10)
+        # TF utilities
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, ros_node, spin_thread=True)
+        # Frames
+        self.ee_frame = 'link_grasp_center'
+        self.base_frame = 'base_link'
+        self._init_ee2base = None
+        # debug
+        self.debug_publisher = self.ros_node.create_publisher(PoseStamped, '/debug/ee_pose', 10)
+
+    def _ensure_init_pose(self, force: bool = False):
+        """Capture the initial absolute pose of ee_frame in base_frame using TF."""
+        if self._init_ee2base is not None and not force:
+            return True
+        try:
+            # Store as tuple for fast access: (px,py,pz, qx,qy,qz,qw)
+            self._init_ee2base = self.tf_buffer.lookup_transform(self.base_frame, self.ee_frame, rclpy.time.Time(), timeout=Duration(seconds=1.0))
+            self.ros_node.get_logger().info(
+                f"[PoseHandler] Captured init_pose of {self.ee_frame} in {self.base_frame}: "
+                f"Transform: {self._init_ee2base.transform.translation}, Rotation: {self._init_ee2base.transform.rotation}")
+            return True
+        except Exception as e:
+            self.ros_node.get_logger().error(f"[PoseHandler] Failed to capture init_pose via TF: {e}")
+            return False
 
     def process(self, data_dict):
         """Process and cache pose data."""
         with self._data_lock:
             self._cached_data = data_dict.copy()
             self._last_update_time = time.time()
-        
         self.ros_node.get_logger().debug(f"Cached pose data: {data_dict.get('position', {})}")
-    
+
     def get_cached_message(self):
         """Get the latest cached pose message."""
         with self._data_lock:
             if self._cached_data is None:
                 return None
-            
-            position = self._cached_data.get("position", {})
-            rotation = self._cached_data.get("rotation", {})
+            position = self._cached_data.get("p", {})
+            rotation = self._cached_data.get("q", {})
             timestamp = self._cached_data.get("timestamp", time.time())
-            
-            return self._convert_to_pose_stamped(position, rotation, timestamp)
-    
+            first_enter = self._cached_data.get("first_enter", 0)
+        
+        # Handle first_enter flag: capture init pose
+        if first_enter == 1:
+            self._ensure_init_pose(force=True)
+
+        if self._ensure_init_pose() is False:
+            self.ros_node.get_logger().error("Failed to ensure initial pose")
+            return None
+
+        return self._convert_to_tcp_pose(position, rotation, timestamp)
+
     def publish_cached_message(self):
         """Publish the cached pose message if available."""
         msg = self.get_cached_message()
         if msg is not None:
             self.publisher.publish(msg)
-            self.ros_node.get_logger().debug(f"Published cached pose: {msg.pose.position}")
+            #debug
+            self.ros_node.get_logger().debug(
+                f"Published pose in frame '{msg.header.frame_id}': p=({msg.pose.position.x:.3f},{msg.pose.position.y:.3f},{msg.pose.position.z:.3f})")
+            self.debug_publisher.publish(msg)
             return True
         return False
     
-    def _convert_to_pose_stamped(self, position, rotation, timestamp):
-        """Convert position and rotation data to ROS PoseStamped message."""
+    def _convert_to_tcp_pose(self, position, rotation, timestamp):
+
+        # Build relative transform from VR (keep existing axis mapping)
+        delta_pose = Pose()
+        delta_pose.position.x = position[0]
+        delta_pose.position.y = position[1]
+        delta_pose.position.z = position[2]
+        delta_pose.orientation.x = rotation[0]
+        delta_pose.orientation.y = rotation[1]
+        delta_pose.orientation.z = rotation[2]
+        delta_pose.orientation.w = rotation[3]
+
+        # print self._init_pose
+        new_ee_pose = do_transform_pose(delta_pose, self._init_ee2base)
+
+        if new_ee_pose is None:
+            self.ros_node.get_logger().error("Failed to transform pose using TF")
+            return None
+
+        # Build PoseStamped
         pose_msg = PoseStamped()
-        # Set header
         pose_msg.header = Header()
-        pose_msg.header.stamp = rclpy.time.Time(nanoseconds=int(timestamp * 1e6)).to_msg()
-        pose_msg.header.frame_id = "link_grasp_center"  # Use a more descriptive frame ID
-        
-        # Set position
-        pose_msg.pose.position.x = float(position.get("x", 0.0))
-        pose_msg.pose.position.y = float(position.get("y", 0.0))
-        pose_msg.pose.position.z = float(position.get("z", 0.0))
-        
-        # Set orientation
-        pose_msg.pose.orientation.x = float(rotation.get("x", 0.0))
-        pose_msg.pose.orientation.y = float(rotation.get("y", 0.0))
-        pose_msg.pose.orientation.z = float(rotation.get("z", 0.0))
-        pose_msg.pose.orientation.w = float(rotation.get("w", 1.0))
-        
+        pose_msg.header.stamp = self.ros_node.get_clock().now().to_msg()
+        pose_msg.header.frame_id = self.base_frame
+        pose_msg.pose = new_ee_pose
         return pose_msg
 
 
@@ -366,7 +408,7 @@ class MessageHandlerFactory:
     def create_handler(topic, ros_node):
         """Create and return an appropriate handler for the given topic."""
         if topic == "ee_pose":
-            return PoseMessageHandler(ros_node, publish_rate_hz=50.0)  # High freq for pose
+            return PoseMessageHandler(ros_node, publish_rate_hz=30.0)  # High freq for pose
         elif topic == "velocity":
             return TwistMessageHandler(ros_node, publish_rate_hz=30.0)  # Medium freq for velocity
         elif topic == "motion_command":
