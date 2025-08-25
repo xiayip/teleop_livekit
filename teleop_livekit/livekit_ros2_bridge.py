@@ -23,13 +23,14 @@ from rclpy.client import Client
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # Common ROS2 message types
-from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, Int8, UInt64, Int64
+from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, Int8, UInt64, Int64, Header
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vector3
 from sensor_msgs.msg import Image, CompressedImage, JointState
 from nav_msgs.msg import Odometry
 from builtin_interfaces.msg import Time
 from tf2_ros import Buffer, TransformListener
 from rclpy.duration import Duration
+from tf2_geometry_msgs import do_transform_pose
 
 class ROS2MessageFactory:
     """ROS2 message factory class"""
@@ -141,7 +142,6 @@ class PublisherInfo:
     topic_name: str
     created_time: float
 
-
 class LiveKitROS2Bridge(Node):
     """LiveKit ROS2 bridge node"""
     
@@ -160,6 +160,17 @@ class LiveKitROS2Bridge(Node):
             Image, '/image_raw', self.image_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
+        # covert offset pose to absolute ee pose
+        self.offset_pose_subscriber = self.create_subscription(
+            PoseStamped, '/ee_offset_pose', self.offset_pose_subscriber_callback,
+            qos_profile=rclpy.qos.QoSProfile(depth=1)
+        )
+        self.ee_pose_publisher = self.create_publisher(
+            PoseStamped, '/servo_node/pose_target_cmds', QoSProfile(depth=10)
+        )
+        # debug
+        self.debug_publisher = self.create_publisher(PoseStamped, '/debug/ee_pose', 10)
+        # log init ee pose Transform
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
         self.ee_frame = 'link_grasp_center'
@@ -181,7 +192,7 @@ class LiveKitROS2Bridge(Node):
             # Parse JSON data
             packet = json.loads(data.data.decode('utf-8'))
             # debug
-            self.get_logger().info(f"Received data packet: {packet}")
+            # self.get_logger().info(f"Received data packet: {packet}")
             packet_type = packet.get('packetType', '')
             
             if packet_type == 'ros2_message':
@@ -327,6 +338,20 @@ class LiveKitROS2Bridge(Node):
             )
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
+
+    def offset_pose_subscriber_callback(self, msg: PoseStamped):
+        if not self._ensure_init_pose():
+            self.get_logger().error("Initial pose not set, cannot apply offset")
+            return
+        self.get_logger().info(f"Received offset pose: {msg.pose}")
+        new_ee_pose = do_transform_pose(msg.pose, self._init_ee2base)
+        # Build PoseStamped
+        ee_pose_msg = PoseStamped()
+        ee_pose_msg.header = Header()
+        ee_pose_msg.header.stamp = self.get_clock().now().to_msg()
+        ee_pose_msg.header.frame_id = self.base_frame
+        ee_pose_msg.pose = new_ee_pose
+        self.ee_pose_publisher.publish(ee_pose_msg)
 
     def _ensure_init_pose(self):
         """Capture the initial absolute pose of ee_frame in base_frame using TF."""

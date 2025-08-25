@@ -36,8 +36,8 @@ async def main():
             await asyncio.sleep(1.0)
             
             # Periodically output statistics
-            stats = manager.get_statistics()
-            print(f"Statistics: {stats}")
+            # stats = manager.get_statistics()
+            # print(f"Statistics: {stats}")
 
     except KeyboardInterrupt:
         print("\nProgram interrupted by user")
