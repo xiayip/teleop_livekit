@@ -25,7 +25,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 # Common ROS2 message types
 from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, Int8, UInt64, Int64
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vector3
-from sensor_msgs.msg import Image, CompressedImage
+from sensor_msgs.msg import Image, CompressedImage, JointState
 from nav_msgs.msg import Odometry
 from builtin_interfaces.msg import Time
 from std_msgs.msg import Header
@@ -55,6 +55,7 @@ class ROS2MessageFactory:
         'geometry_msgs/msg/Vector3': Vector3,
         'sensor_msgs/msg/Image': Image,
         'sensor_msgs/msg/CompressedImage': CompressedImage,
+        'sensor_msgs/msg/JointState': JointState,
         'nav_msgs/msg/Odometry': Odometry,
     }
     
@@ -292,14 +293,14 @@ class LiveKitROS2Bridge(Node):
         
         # Create video track if not created yet
         if not self._video_track_created:
-            asyncio.create_task(self._ensure_video_track_created())
+            asyncio.create_task(self._create_video_track(msg.width, msg.height, 30))
+            self._video_track_created = True
             return
-        
-        """Handle image message and forward to LiveKit"""
+        # check encoding
         if msg.encoding != 'rgb8':
             self.get_logger().warn(f'Unsupported encoding {msg.encoding}, skipping frame')
             return
-        
+        # capture_frame
         try:
             frame_bytes = bytearray(msg.data)
             frame = rtc.VideoFrame(
@@ -312,13 +313,7 @@ class LiveKitROS2Bridge(Node):
         except Exception as e:
             self.get_logger().error(f"Error capturing frame: {e}")
 
-    async def _ensure_video_track_created(self):
-        """Ensure video track is created"""
-        if not self._video_track_created:
-            await self.create_video_track(640, 480, 30)
-            self._video_track_created = True
-
-    async def create_video_track(self, width, height, fps):
+    async def _create_video_track(self, width, height, fps):
         """Publish a video track with the specified parameters."""
         self.source = rtc.VideoSource(width, height)
         track = rtc.LocalVideoTrack.create_video_track("wrist_camera", self.source)
@@ -331,8 +326,6 @@ class LiveKitROS2Bridge(Node):
             )
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
-        return self.source
-
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
