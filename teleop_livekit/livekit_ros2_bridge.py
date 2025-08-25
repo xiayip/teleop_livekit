@@ -28,8 +28,8 @@ from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vecto
 from sensor_msgs.msg import Image, CompressedImage, JointState
 from nav_msgs.msg import Odometry
 from builtin_interfaces.msg import Time
-from std_msgs.msg import Header
-
+from tf2_ros import Buffer, TransformListener
+from rclpy.duration import Duration
 
 class ROS2MessageFactory:
     """ROS2 message factory class"""
@@ -148,30 +148,31 @@ class LiveKitROS2Bridge(Node):
     def __init__(self, room: rtc.Room, node_name: str = 'livekit_ros2_bridge'):
         super().__init__(node_name)
         
+        # livekit stuff
         self.room = room
+        self.room.on("data_received", self.on_data_received)
+        self.source = None
+        self._video_track_created = False
+        # ROS stuff
         self._topic_publishers: Dict[str, PublisherInfo] = {}
         self.service_clients: Dict[str, Client] = {}
         self.image_subscriber = self.create_subscription(
             Image, '/image_raw', self.image_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
-        
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
+        self.ee_frame = 'link_grasp_center'
+        self.base_frame = 'base_link'
+        self._init_ee2base = None
         # QoS configuration
         self.default_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
-        
-        # Register LiveKit events
-        self.room.on("data_received", self.on_data_received)
-
-        self.source = None
-        self._video_track_created = False
-        
         # Statistics
         self.error_count = 0
-
         self.get_logger().info(f"LiveKit ROS2 bridge started: {node_name}")
     
     def on_data_received(self, data: rtc.DataPacket):
@@ -326,6 +327,21 @@ class LiveKitROS2Bridge(Node):
             )
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
+
+    def _ensure_init_pose(self):
+        """Capture the initial absolute pose of ee_frame in base_frame using TF."""
+        if self._init_ee2base is not None:
+            return True
+        try:
+            # Store as tuple for fast access: (px,py,pz, qx,qy,qz,qw)
+            self._init_ee2base = self.tf_buffer.lookup_transform(self.base_frame, self.ee_frame, rclpy.time.Time(), timeout=Duration(seconds=1.0))
+            self.get_logger().info(
+                f"[PoseHandler] Captured init_pose of {self.ee_frame} in {self.base_frame}: "
+                f"Transform: {self._init_ee2base.transform.translation}, Rotation: {self._init_ee2base.transform.rotation}")
+            return True
+        except Exception as e:
+            self.get_logger().error(f"[PoseHandler] Failed to capture init_pose via TF: {e}")
+            return False
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
