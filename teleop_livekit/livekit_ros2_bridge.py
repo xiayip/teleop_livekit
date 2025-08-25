@@ -32,6 +32,9 @@ from tf2_ros import Buffer, TransformListener
 from rclpy.duration import Duration
 from tf2_geometry_msgs import do_transform_pose
 
+# NEW: import VideoStreamManager
+from .video_stream_manager import VideoStreamManager
+
 class ROS2MessageFactory:
     """ROS2 message factory class"""
     
@@ -151,8 +154,10 @@ class LiveKitROS2Bridge(Node):
         # livekit stuff
         self.room = room
         self.room.on("data_received", self.on_data_received)
-        self.source = None
-        self._video_track_created = False
+        
+        # NEW: Video stream manager
+        self.video_manager = VideoStreamManager(self.room, self.get_logger())
+        
         # ROS stuff
         self._topic_publishers: Dict[str, PublisherInfo] = {}
         self.service_clients: Dict[str, Client] = {}
@@ -299,45 +304,8 @@ class LiveKitROS2Bridge(Node):
         }
     
     def image_callback(self, msg: Image):
-        if len(self.room.remote_participants) == 0:
-            self.get_logger().debug("No participants connected, skipping frame upload")
-            return
-        
-        # Create video track if not created yet
-        if not self._video_track_created:
-            asyncio.create_task(self._create_video_track(msg.width, msg.height, 30))
-            self._video_track_created = True
-            return
-        # check encoding
-        if msg.encoding != 'rgb8':
-            self.get_logger().warn(f'Unsupported encoding {msg.encoding}, skipping frame')
-            return
-        # capture_frame
-        try:
-            frame_bytes = bytearray(msg.data)
-            frame = rtc.VideoFrame(
-                width=msg.width,
-                height=msg.height,
-                type=rtc.VideoBufferType.RGB24,
-                data=frame_bytes
-            )
-            self.source.capture_frame(frame)
-        except Exception as e:
-            self.get_logger().error(f"Error capturing frame: {e}")
-
-    async def _create_video_track(self, width, height, fps):
-        """Publish a video track with the specified parameters."""
-        self.source = rtc.VideoSource(width, height)
-        track = rtc.LocalVideoTrack.create_video_track("wrist_camera", self.source)
-        await self.room.local_participant.publish_track(
-            track,
-            rtc.TrackPublishOptions(
-                source=rtc.TrackSource.SOURCE_CAMERA,
-                video_encoding=rtc.VideoEncoding(max_framerate=fps, max_bitrate=3_000_000),
-                video_codec=rtc.VideoCodec.AV1,
-            )
-        )
-        self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
+        # Delegate to VideoStreamManager
+        self.video_manager.process_image(msg)
 
     def offset_pose_subscriber_callback(self, msg: PoseStamped):
         if not self._ensure_init_pose():
