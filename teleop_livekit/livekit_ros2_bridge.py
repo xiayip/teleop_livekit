@@ -234,21 +234,32 @@ class LiveKitROS2Bridge(Node):
     
     def handle_ros2_service_call(self, packet: Dict[str, Any]):
         """Handle ROS2 service call"""
+        self.get_logger().info(f"Received service call packet: {packet}")
         try:
-            service_name = packet.get('service_name', '')
-            service_type = packet.get('service_type', '')
+            service_name = packet.get('serviceName', '')
+            service_type = packet.get('serviceType', '')
             request_data = packet.get('request', {})
-            request_id = packet.get('request_id', '')
+            request_id = packet.get('requestId', '')
             
             # Service call logic should be implemented here
             # Simplified version
             self.get_logger().info(f"Received service call request: {service_name}")
-            
+
+            success = False
+            if service_name == 'start_teleop':
+                self.get_logger().info("Starting teleoperation...")
+                # Implement teleoperation start logic here
+                if self._ensure_init_pose(force=True):
+                    success = True
+                    self.get_logger().info("Initial pose confirmed.")
+                else:
+                    self.get_logger().error("Initial pose not set, cannot start teleoperation.")
+
             # Send service response
             asyncio.create_task(self.send_feedback({
-                'packet_type': 'ros2_service_response',
-                'request_id': request_id,
-                'success': True,
+                'packetType': 'ros2_service_response',
+                'requestId': request_id,
+                'success': success,
                 'response': {'result': 'Service call completed'}
             }))
             
@@ -311,7 +322,7 @@ class LiveKitROS2Bridge(Node):
         if not self._ensure_init_pose():
             self.get_logger().error("Initial pose not set, cannot apply offset")
             return
-        self.get_logger().info(f"Received offset pose: {msg.pose}")
+        # self.get_logger().info(f"Received offset pose: {msg.pose}")
         new_ee_pose = do_transform_pose(msg.pose, self._init_ee2base)
         # Build PoseStamped
         ee_pose_msg = PoseStamped()
@@ -321,9 +332,9 @@ class LiveKitROS2Bridge(Node):
         ee_pose_msg.pose = new_ee_pose
         self.ee_pose_publisher.publish(ee_pose_msg)
 
-    def _ensure_init_pose(self):
+    def _ensure_init_pose(self, force: bool = False):
         """Capture the initial absolute pose of ee_frame in base_frame using TF."""
-        if self._init_ee2base is not None:
+        if self._init_ee2base is not None and not force:
             return True
         try:
             # Store as tuple for fast access: (px,py,pz, qx,qy,qz,qw)
