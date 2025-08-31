@@ -27,10 +27,11 @@ from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, 
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vector3
 from sensor_msgs.msg import Image, CompressedImage, JointState
 from nav_msgs.msg import Odometry
-from builtin_interfaces.msg import Time
+from builtin_interfaces.msg import Time, Duration as MsgDuration
 from tf2_ros import Buffer, TransformListener
-from rclpy.duration import Duration
+from rclpy.duration import Duration as RclpyDuration
 from tf2_geometry_msgs import do_transform_pose
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # NEW: import VideoStreamManager
 from .video_stream_manager import VideoStreamManager
@@ -154,7 +155,9 @@ class LiveKitROS2Bridge(Node):
         # livekit stuff
         self.room = room
         self.room.on("data_received", self.on_data_received)
-        
+        self.room.on("participant_connected", lambda participant: self.get_logger().info(f"Participant connected: {participant.identity}"))
+        self.room.on("participant_disconnected", lambda participant: self.get_logger().info(f"Participant disconnected: {participant.identity}"))
+
         # NEW: Video stream manager
         self.video_manager = VideoStreamManager(self.room, self.get_logger())
         
@@ -173,6 +176,15 @@ class LiveKitROS2Bridge(Node):
         self.ee_pose_publisher = self.create_publisher(
             PoseStamped, '/servo_node/pose_target_cmds', QoSProfile(depth=10)
         )
+        self.joint_trajectory_publisher = self.create_publisher(
+            JointTrajectory, '/joint_trajectory', 10)
+        # preset pose
+        self.ready_to_tap_pose = JointTrajectory()
+        self.ready_to_tap_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        self.ready_to_tap_pose.points.append(JointTrajectoryPoint(positions=[-1.5707, 0.5725, -1.3114, 0.0, 0.7077, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
+        self.ready_to_pick_pose = JointTrajectory()
+        self.ready_to_pick_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        self.ready_to_pick_pose.points.append(JointTrajectoryPoint(positions=[1.5707, 0.71, -0.58, 0.0, 1.2, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
         # debug
         self.debug_publisher = self.create_publisher(PoseStamped, '/debug/ee_pose', 10)
         # log init ee pose Transform
@@ -254,6 +266,18 @@ class LiveKitROS2Bridge(Node):
                     self.get_logger().info("Initial pose confirmed.")
                 else:
                     self.get_logger().error("Initial pose not set, cannot start teleoperation.")
+            elif service_name == 'goto_pick_pose':
+                self.get_logger().info("Going to pick pose...")
+                # create a joint trajectory publisher and publish a trajectory to go to pick pose
+                joint_trajectory = self.ready_to_pick_pose
+                self.joint_trajectory_publisher.publish(joint_trajectory)
+                success = True
+            elif service_name == 'goto_tap_pose':
+                self.get_logger().info("Going to tap pose...")
+                # create a joint trajectory publisher and publish a trajectory to go to tap pose
+                joint_trajectory = self.ready_to_tap_pose
+                self.joint_trajectory_publisher.publish(joint_trajectory)
+                success = True
 
             # Send service response
             asyncio.create_task(self.send_feedback({
@@ -338,7 +362,7 @@ class LiveKitROS2Bridge(Node):
             return True
         try:
             # Store as tuple for fast access: (px,py,pz, qx,qy,qz,qw)
-            self._init_ee2base = self.tf_buffer.lookup_transform(self.base_frame, self.ee_frame, rclpy.time.Time(), timeout=Duration(seconds=1.0))
+            self._init_ee2base = self.tf_buffer.lookup_transform(self.base_frame, self.ee_frame, rclpy.time.Time(), timeout=RclpyDuration(seconds=1.0))
             self.get_logger().info(
                 f"[PoseHandler] Captured init_pose of {self.ee_frame} in {self.base_frame}: "
                 f"Transform: {self._init_ee2base.transform.translation}, Rotation: {self._init_ee2base.transform.rotation}")
