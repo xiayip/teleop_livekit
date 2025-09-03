@@ -21,6 +21,8 @@ from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.client import Client
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.duration import Duration as RclpyDuration
+from tf2_ros import Buffer, TransformListener
 
 # Common ROS2 message types
 from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, Int8, UInt64, Int64, Header
@@ -28,13 +30,8 @@ from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vecto
 from sensor_msgs.msg import Image, CompressedImage, JointState
 from nav_msgs.msg import Odometry
 from builtin_interfaces.msg import Time, Duration as MsgDuration
-from tf2_ros import Buffer, TransformListener
-from rclpy.duration import Duration as RclpyDuration
 from tf2_geometry_msgs import do_transform_pose
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
-# NEW: import VideoStreamManager
-from .video_stream_manager import VideoStreamManager
 
 class ROS2MessageFactory:
     """ROS2 message factory class"""
@@ -157,10 +154,8 @@ class LiveKitROS2Bridge(Node):
         self.room.on("data_received", self.on_data_received)
         self.room.on("participant_connected", lambda participant: self.get_logger().info(f"Participant connected: {participant.identity}"))
         self.room.on("participant_disconnected", lambda participant: self.get_logger().info(f"Participant disconnected: {participant.identity}"))
+        self.video_source = None
 
-        # NEW: Video stream manager
-        self.video_manager = VideoStreamManager(self.room, self.get_logger())
-        
         # ROS stuff
         self._topic_publishers: Dict[str, PublisherInfo] = {}
         self.service_clients: Dict[str, Client] = {}
@@ -339,9 +334,23 @@ class LiveKitROS2Bridge(Node):
         }
     
     def image_callback(self, msg: Image):
-        # Delegate to VideoStreamManager
-        self.video_manager.process_image(msg)
-
+        """Process a ROS Image message: ensure track then capture frame.
+        Returns True if a frame was captured, False otherwise.
+        """
+        # Skip if no viewers
+        if len(self.room.remote_participants) == 0:
+            self.get_logger().debug("No participants connected, skipping frame upload")
+            return False
+        frame_bytes = bytearray(msg.data)
+        frame = rtc.VideoFrame(
+            width=msg.width,
+            height=msg.height,
+            type=rtc.VideoBufferType.RGB24,
+            data=frame_bytes,
+        )
+        if self.video_source is not None:
+            self.video_source.capture_frame(frame)
+        
     def offset_pose_subscriber_callback(self, msg: PoseStamped):
         if not self._ensure_init_pose():
             self.get_logger().error("Initial pose not set, cannot apply offset")
@@ -370,6 +379,21 @@ class LiveKitROS2Bridge(Node):
         except Exception as e:
             self.get_logger().error(f"[PoseHandler] Failed to capture init_pose via TF: {e}")
             return False
+        
+    async def create_video_track(self, width: int, height: int, fps: int):
+        """Create and publish LiveKit video track."""
+        self.video_source = rtc.VideoSource(width, height)
+        track = rtc.LocalVideoTrack.create_video_track("wrist_camera", self.video_source)
+        await self.room.local_participant.publish_track(
+            track,
+            rtc.TrackPublishOptions(
+                source=rtc.TrackSource.SOURCE_CAMERA,
+                video_encoding=rtc.VideoEncoding(max_framerate=fps, max_bitrate=3_000_000),
+                video_codec=rtc.VideoCodec.AV1,
+            ),
+        )
+        self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
+
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
@@ -394,6 +418,7 @@ class LiveKitROS2BridgeManager:
 
             # Create bridge node
             self.bridge = LiveKitROS2Bridge(self.room)
+            await self.bridge.create_video_track(640, 480, 30)
             
             # Start ROS2 thread
             self.running = True
