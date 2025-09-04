@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, Callable
 from dataclasses import dataclass
 import threading
 import importlib
+from typing import List
 
 # LiveKit imports
 from livekit import rtc
@@ -32,6 +33,7 @@ from nav_msgs.msg import Odometry
 from builtin_interfaces.msg import Time, Duration as MsgDuration
 from tf2_geometry_msgs import do_transform_pose
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from controller_manager_msgs.srv import SwitchController, ListControllers
 
 class ROS2MessageFactory:
     """ROS2 message factory class"""
@@ -163,8 +165,7 @@ class LiveKitROS2Bridge(Node):
             Image, '/image_raw', self.image_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
-        # covert offset pose to absolute ee pose
-        self.offset_pose_subscriber = self.create_subscription(
+        self.offset_pose_subscriber = self.create_subscription(  # covert offset pose to absolute ee pose
             PoseStamped, '/ee_offset_pose', self.offset_pose_subscriber_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
@@ -173,6 +174,10 @@ class LiveKitROS2Bridge(Node):
         )
         self.joint_trajectory_publisher = self.create_publisher(
             JointTrajectory, '/joint_trajectory', 10)
+        self.controller_switch_client = self.create_client(
+            SwitchController, '/controller_manager/switch_controller')
+        self.controller_list_client = self.create_client(
+            ListControllers, '/controller_manager/list_controllers')
         # preset pose
         self.ready_to_tap_pose = JointTrajectory()
         self.ready_to_tap_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
@@ -256,23 +261,27 @@ class LiveKitROS2Bridge(Node):
             if service_name == 'start_teleop':
                 self.get_logger().info("Starting teleoperation...")
                 # Implement teleoperation start logic here
-                if self._ensure_init_pose(force=True):
+                if self._ensure_init_pose(force=True) and self.switch_to_forward_position_controller():
                     success = True
                     self.get_logger().info("Initial pose confirmed.")
                 else:
                     self.get_logger().error("Initial pose not set, cannot start teleoperation.")
             elif service_name == 'goto_pick_pose':
                 self.get_logger().info("Going to pick pose...")
-                # create a joint trajectory publisher and publish a trajectory to go to pick pose
-                joint_trajectory = self.ready_to_pick_pose
-                self.joint_trajectory_publisher.publish(joint_trajectory)
-                success = True
+                if (self.switch_to_joint_trajectory_controller()):
+                    joint_trajectory = self.ready_to_pick_pose
+                    self.joint_trajectory_publisher.publish(joint_trajectory)
+                    success = True
+                else:
+                    self.get_logger().error("Failed to switch to joint trajectory controller.")
             elif service_name == 'goto_tap_pose':
                 self.get_logger().info("Going to tap pose...")
-                # create a joint trajectory publisher and publish a trajectory to go to tap pose
-                joint_trajectory = self.ready_to_tap_pose
-                self.joint_trajectory_publisher.publish(joint_trajectory)
-                success = True
+                if (self.switch_to_joint_trajectory_controller()):
+                    joint_trajectory = self.ready_to_tap_pose
+                    self.joint_trajectory_publisher.publish(joint_trajectory)
+                    success = True
+                else:
+                    self.get_logger().error("Failed to switch to joint trajectory controller.")
 
             # Send service response
             asyncio.create_task(self.send_feedback({
@@ -394,6 +403,59 @@ class LiveKitROS2Bridge(Node):
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
 
+    def get_active_controllers(self) -> Optional[List[str]]:
+        """List current controllers and their states."""
+        if not self.controller_list_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error("Controller list service not available")
+            return None
+        request = ListControllers.Request()
+        future = self.controller_list_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        if future.result() is not None:
+            controllers = future.result().controller
+            active_controllers = [c.name for c in controllers if c.state == 'active']
+            self.get_logger().info(f"Active controllers: {active_controllers}")
+            return active_controllers
+        self.get_logger().error("Failed to get controller list or no response")
+        return None
+
+    def switch_controllers(self, active_controllers: List[str], deactivate_controllers: List[str]):
+        """Switch the active arm controller."""
+        # check if the controller has already been activated
+        current_active = self.get_active_controllers()
+        if not current_active:
+            self.get_logger().error("No active controllers found")
+            return False
+        if all(ac in current_active for ac in active_controllers):
+            self.get_logger().info(f"Controllers {active_controllers} already active, no switch needed")
+            return True
+
+        # send service call to switch arm controller
+        request = SwitchController.Request()
+        request.activate_controllers = active_controllers
+        request.deactivate_controllers = deactivate_controllers
+        request.strictness = SwitchController.Request.BEST_EFFORT
+        future = self.controller_switch_client.call_async(request)
+        self.get_logger().info(f"Switching controllers: {deactivate_controllers} -> {active_controllers}")
+        if future.result() is not None and future.result().ok:
+            self.get_logger().info(f"Controller switch result: {future.result().ok}")
+            return True
+        self.get_logger().error("Controller switch failed or no response")
+        return False
+
+    def switch_to_joint_trajectory_controller(self):
+        """Switch to joint trajectory controller."""
+        return self.switch_controllers(
+            active_controllers=['z1_arm_trajectory_controller'],
+            deactivate_controllers=['z1_arm_forward_position_controller']
+        )
+
+    def switch_to_forward_position_controller(self):
+        """Switch to forward position controller."""
+        return self.switch_controllers(
+            active_controllers=['z1_arm_forward_position_controller'],
+            deactivate_controllers=['z1_arm_trajectory_controller']
+        )
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
