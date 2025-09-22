@@ -34,6 +34,7 @@ from builtin_interfaces.msg import Time, Duration as MsgDuration
 from tf2_geometry_msgs import do_transform_pose
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from controller_manager_msgs.srv import SwitchController, ListControllers
+from std_msgs.msg import ByteMultiArray
 
 class ROS2MessageFactory:
     """ROS2 message factory class"""
@@ -165,6 +166,10 @@ class LiveKitROS2Bridge(Node):
             Image, '/image_raw', self.image_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
+        self.compressed_pointcloud_subscriber = self.create_subscription(
+            ByteMultiArray, '/compressed_pointcloud', self.compressed_pointcloud_callback,
+            qos_profile=rclpy.qos.QoSProfile(depth=1)
+        )
         self.offset_pose_subscriber = self.create_subscription(  # covert offset pose to absolute ee pose
             PoseStamped, '/ee_offset_pose', self.offset_pose_subscriber_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
@@ -199,6 +204,16 @@ class LiveKitROS2Bridge(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
+        # LiveKit publishes must happen on the asyncio loop started in the main thread
+        try:
+            self._asyncio_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._asyncio_loop = None
+        # Sending guard for pointcloud
+        self._send_lock = threading.Lock()
+        self._is_sending_pointcloud = False
+        # Continuous id for pointcloud messages
+        self._pointcloud_seq = 0
         # Statistics
         self.error_count = 0
         self.get_logger().info(f"LiveKit ROS2 bridge started: {node_name}")
@@ -359,6 +374,72 @@ class LiveKitROS2Bridge(Node):
         )
         if self.video_source is not None:
             self.video_source.capture_frame(frame)
+    
+    def _publish_large_payload(self, payload: bytes, *, topic: str, chunk_size: int = 50000, on_done: Optional[Callable[[Optional[Exception]], None]] = None, message_id: Optional[int] = None):
+        """Send bytes payload across LiveKit data channel safely from the ROS thread."""
+        if self._asyncio_loop is None:
+            self.get_logger().error("No asyncio event loop available for LiveKit publish")
+            return
+        def _publish_chunks():
+            async def _do_publish():
+                total_chunks = (len(payload) + chunk_size - 1) // chunk_size
+                for idx in range(0, len(payload), chunk_size):
+                    chunk = payload[idx: idx + chunk_size]
+                    metadata = json.dumps({
+                        "id": message_id,
+                        "chunk": idx // chunk_size,
+                        "total": total_chunks,
+                    }).encode("utf-8")
+                    await self.room.local_participant.publish_data(metadata, topic=f"{topic}:meta")
+                    await self.room.local_participant.publish_data(chunk, topic=topic)
+            return _do_publish()
+        future = asyncio.run_coroutine_threadsafe(_publish_chunks(), self._asyncio_loop)
+        def _done_cb(f: asyncio.Future):
+            exc: Optional[Exception] = None
+            try:
+                f.result()
+            except Exception as e:
+                exc = e
+                self.get_logger().error(f"Failed to publish LiveKit data on topic '{topic}': {e}")
+            if on_done is not None:
+                try:
+                    on_done(exc)
+                except Exception as cb_e:
+                    self.get_logger().error(f"on_done callback error for topic '{topic}': {cb_e}")
+        future.add_done_callback(_done_cb)
+
+    def _flatten_bytes(self, data) -> bytes:
+        """Convert various containers to a flat bytes buffer."""
+        if len(data) > 0 and isinstance(data[0], (bytes, bytearray, memoryview)):
+            return b"".join(bytes(seg) for seg in data)
+        return bytes(data)
+    
+    def _on_pointcloud_send_done(self, exc: Optional[Exception]):
+        with self._send_lock:
+            self._is_sending_pointcloud = False
+
+    def compressed_pointcloud_callback(self, msg: ByteMultiArray):
+        """Process a ROS CompressedPointCloud2 message: send as chunked binary over LiveKit."""
+        try:
+            payload = self._flatten_bytes(msg.data)
+            self.get_logger().info(f"Received compressed pointcloud of size {len(payload)} bytes")
+            if len(self.room.remote_participants) == 0:
+                return False
+            # Skip if a previous send is still in progress
+            self._pointcloud_seq += 1
+            with self._send_lock:
+                if self._is_sending_pointcloud:
+                    self.get_logger().debug("Pointcloud send in progress, skipping this frame")
+                    return False
+                self._is_sending_pointcloud = True
+                msg_id = self._pointcloud_seq
+            # Schedule chunked publish; flag will be reset in on_done
+            self._publish_large_payload(payload, topic="pointcloud", on_done=self._on_pointcloud_send_done, message_id=msg_id)
+        except Exception as e:
+            # Reset flag on error if we set it
+            self.get_logger().error(f"Failed to publish pointcloud data: {e}")
+            return False
+        return True
         
     def offset_pose_subscriber_callback(self, msg: PoseStamped):
         if not self._ensure_init_pose():
