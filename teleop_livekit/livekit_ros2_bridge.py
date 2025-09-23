@@ -27,7 +27,7 @@ from tf2_ros import Buffer, TransformListener
 
 # Common ROS2 message types
 from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, Int8, UInt64, Int64, Header
-from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vector3
+from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Pose, Point, Quaternion, Vector3
 from sensor_msgs.msg import Image, CompressedImage, JointState
 from nav_msgs.msg import Odometry
 from builtin_interfaces.msg import Time, Duration as MsgDuration
@@ -53,6 +53,7 @@ class ROS2MessageFactory:
         'std_msgs/msg/Float64': Float64,
         
         'geometry_msgs/msg/Twist': Twist,
+        'geometry_msgs/msg/TwistStamped': TwistStamped,
         'geometry_msgs/msg/PoseStamped': PoseStamped,
         'geometry_msgs/msg/Pose': Pose,
         'geometry_msgs/msg/Point': Point,
@@ -104,6 +105,14 @@ class ROS2MessageFactory:
                 attr = getattr(msg, key)
                 
                 if isinstance(value, dict):
+                    # if time stamp detected, use local time
+                    if key == 'stamp':
+                        if hasattr(attr, 'sec') and hasattr(attr, 'nanosec'):
+                            now = rclpy.clock.Clock().now().to_msg()
+                            attr.sec = now.sec
+                            attr.nanosec = now.nanosec
+                            print(f"Timestamp updated: {attr.sec}.{attr.nanosec}")
+                            continue
                     # Nested message
                     cls._populate_message(attr, value)
                 elif isinstance(value, list):
@@ -115,27 +124,19 @@ class ROS2MessageFactory:
                     else:
                         setattr(msg, key, value)
                 else:
-                    # Basic type
-                    if key == 'stamp' and isinstance(value, (int, float)):
-                        # Special timestamp handling
-                        stamp = Time()
-                        stamp.sec = int(value)
-                        stamp.nanosec = int((value - int(value)) * 1e9)
-                        setattr(msg, key, stamp)
+                    # Type conversion handling
+                    attr_type = type(getattr(msg, key))
+                    if attr_type == float and isinstance(value, (int, str)):
+                        # Convert integer or string to float
+                        setattr(msg, key, float(value))
+                    elif attr_type == int and isinstance(value, (float, str)):
+                        # Convert float or string to integer
+                        setattr(msg, key, int(value))
+                    elif attr_type == bool and isinstance(value, (int, str)):
+                        # Convert integer or string to boolean
+                        setattr(msg, key, bool(value))
                     else:
-                        # Type conversion handling
-                        attr_type = type(getattr(msg, key))
-                        if attr_type == float and isinstance(value, (int, str)):
-                            # Convert integer or string to float
-                            setattr(msg, key, float(value))
-                        elif attr_type == int and isinstance(value, (float, str)):
-                            # Convert float or string to integer
-                            setattr(msg, key, int(value))
-                        elif attr_type == bool and isinstance(value, (int, str)):
-                            # Convert integer or string to boolean
-                            setattr(msg, key, bool(value))
-                        else:
-                            setattr(msg, key, value)
+                        setattr(msg, key, value)
 
 
 @dataclass
@@ -196,7 +197,7 @@ class LiveKitROS2Bridge(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
         self.ee_frame = 'link_grasp_center'
-        self.base_frame = 'base_link'
+        self.base_frame = 'z1_arm'
         self._init_ee2base = None
         # QoS configuration
         self.default_qos = QoSProfile(
