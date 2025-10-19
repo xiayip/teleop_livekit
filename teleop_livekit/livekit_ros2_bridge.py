@@ -191,6 +191,9 @@ class LiveKitROS2Bridge(Node):
         self.ready_to_pick_pose = JointTrajectory()
         self.ready_to_pick_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
         self.ready_to_pick_pose.points.append(JointTrajectoryPoint(positions=[1.5707, 0.71, -0.58, 0.0, 1.2, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
+        self.go_to_sleep_pose = JointTrajectory()
+        self.go_to_sleep_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        self.go_to_sleep_pose.points.append(JointTrajectoryPoint(positions=[-1.5707, 0.0, 0.0, 0.0, 0.0, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
         # debug
         self.debug_publisher = self.create_publisher(PoseStamped, '/debug/ee_pose', 10)
         # log init ee pose Transform
@@ -294,6 +297,14 @@ class LiveKitROS2Bridge(Node):
                 self.get_logger().info("Going to tap pose...")
                 if (self.switch_to_joint_trajectory_controller()):
                     joint_trajectory = self.ready_to_tap_pose
+                    self.joint_trajectory_publisher.publish(joint_trajectory)
+                    success = True
+                else:
+                    self.get_logger().error("Failed to switch to joint trajectory controller.")
+            elif service_name == 'goto_sleep_pose':
+                self.get_logger().info("Going to sleep pose...")
+                if (self.switch_to_joint_trajectory_controller()):
+                    joint_trajectory = self.go_to_sleep_pose
                     self.joint_trajectory_publisher.publish(joint_trajectory)
                     success = True
                 else:
