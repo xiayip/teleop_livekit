@@ -364,7 +364,7 @@ class LiveKitROS2Bridge(Node):
         """
         # Skip if no viewers
         if len(self.room.remote_participants) == 0:
-            self.get_logger().debug("No participants connected, skipping frame upload")
+            self.get_logger().info("No participants connected, skipping frame upload", throttle_duration_sec=5)
             return False
         frame_bytes = bytearray(msg.data)
         frame = rtc.VideoFrame(
@@ -373,6 +373,7 @@ class LiveKitROS2Bridge(Node):
             type=rtc.VideoBufferType.RGB24,
             data=frame_bytes,
         )
+        # self.get_logger().info(f"Uploading image frame of size {len(frame_bytes)} bytes")
         if self.video_source is not None:
             self.video_source.capture_frame(frame)
     
@@ -423,7 +424,7 @@ class LiveKitROS2Bridge(Node):
         """Process a ROS CompressedPointCloud2 message: send as chunked binary over LiveKit."""
         try:
             payload = self._flatten_bytes(msg.data)
-            self.get_logger().info(f"Received compressed pointcloud of size {len(payload)} bytes")
+            self.get_logger().debug(f"Received compressed pointcloud of size {len(payload)} bytes")
             if len(self.room.remote_participants) == 0:
                 return False
             # Skip if a previous send is still in progress
@@ -480,7 +481,7 @@ class LiveKitROS2Bridge(Node):
             rtc.TrackPublishOptions(
                 source=rtc.TrackSource.SOURCE_CAMERA,
                 video_encoding=rtc.VideoEncoding(max_framerate=fps, max_bitrate=3_000_000),
-                video_codec=rtc.VideoCodec.AV1,
+                video_codec=rtc.VideoCodec.VP8,
             ),
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
