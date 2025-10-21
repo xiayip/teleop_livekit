@@ -21,6 +21,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.publisher import Publisher
 from rclpy.client import Client
+from rclpy.action import ActionClient
+from rclpy.action.client import ClientGoalHandle
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.duration import Duration as RclpyDuration
 from tf2_ros import Buffer, TransformListener
@@ -163,6 +165,8 @@ class LiveKitROS2Bridge(Node):
         # ROS stuff
         self._topic_publishers: Dict[str, PublisherInfo] = {}
         self.service_clients: Dict[str, Client] = {}
+        self.action_clients: Dict[str, ActionClient] = {}
+        self.action_goal_handles: Dict[str, ClientGoalHandle] = {}
         self.image_subscriber = self.create_subscription(
             Image, '/image_raw', self.image_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
@@ -178,22 +182,6 @@ class LiveKitROS2Bridge(Node):
         self.ee_pose_publisher = self.create_publisher(
             PoseStamped, '/servo_node/pose_target_cmds', QoSProfile(depth=10)
         )
-        self.joint_trajectory_publisher = self.create_publisher(
-            JointTrajectory, '/joint_trajectory', 10)
-        self.controller_switch_client = self.create_client(
-            SwitchController, '/controller_manager/switch_controller')
-        self.controller_list_client = self.create_client(
-            ListControllers, '/controller_manager/list_controllers')
-        # preset pose
-        self.ready_to_tap_pose = JointTrajectory()
-        self.ready_to_tap_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
-        self.ready_to_tap_pose.points.append(JointTrajectoryPoint(positions=[-1.5707, 0.5725, -1.3114, 0.0, 0.7077, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
-        self.ready_to_pick_pose = JointTrajectory()
-        self.ready_to_pick_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
-        self.ready_to_pick_pose.points.append(JointTrajectoryPoint(positions=[1.5707, 0.71, -0.58, 0.0, 1.2, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
-        self.go_to_sleep_pose = JointTrajectory()
-        self.go_to_sleep_pose.joint_names = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
-        self.go_to_sleep_pose.points.append(JointTrajectoryPoint(positions=[-1.5707, 0.0, 0.0, 0.0, 0.2912, 0.0], time_from_start=MsgDuration(sec=1, nanosec=0)))
         # debug
         self.debug_publisher = self.create_publisher(PoseStamped, '/debug/ee_pose', 10)
         # log init ee pose Transform
@@ -235,6 +223,8 @@ class LiveKitROS2Bridge(Node):
                 self.handle_ros2_message(packet)
             elif packet_type == 'ros2_service_call':
                 self.handle_ros2_service_call(packet)
+            elif packet_type == 'ros2_action_send_goal':
+                self.handle_ros2_action_send_goal(packet)
             else:
                 self.get_logger().warn(f"Unknown packet type: {packet_type}")
                 
@@ -271,55 +261,222 @@ class LiveKitROS2Bridge(Node):
             service_type = packet.get('serviceType', '')
             request_data = packet.get('request', {})
             request_id = packet.get('requestId', '')
-            
-            # Service call logic should be implemented here
-            # Simplified version
-            self.get_logger().info(f"Received service call request: {service_name}")
 
-            success = False
-            if service_name == 'start_teleop':
-                self.get_logger().info("Starting teleoperation...")
-                # Implement teleoperation start logic here
-                if self._ensure_init_pose(force=True) and self.switch_to_forward_position_controller():
-                    success = True
-                    self.get_logger().info("Initial pose confirmed.")
-                else:
-                    self.get_logger().error("Initial pose not set, cannot start teleoperation.")
-            elif service_name == 'goto_pick_pose':
-                self.get_logger().info("Going to pick pose...")
-                if (self.switch_to_joint_trajectory_controller()):
-                    joint_trajectory = self.ready_to_pick_pose
-                    self.joint_trajectory_publisher.publish(joint_trajectory)
-                    success = True
-                else:
-                    self.get_logger().error("Failed to switch to joint trajectory controller.")
-            elif service_name == 'goto_tap_pose':
-                self.get_logger().info("Going to tap pose...")
-                if (self.switch_to_joint_trajectory_controller()):
-                    joint_trajectory = self.ready_to_tap_pose
-                    self.joint_trajectory_publisher.publish(joint_trajectory)
-                    success = True
-                else:
-                    self.get_logger().error("Failed to switch to joint trajectory controller.")
-            elif service_name == 'goto_sleep_pose':
-                self.get_logger().info("Going to sleep pose...")
-                if (self.switch_to_joint_trajectory_controller()):
-                    joint_trajectory = self.go_to_sleep_pose
-                    self.joint_trajectory_publisher.publish(joint_trajectory)
-                    success = True
-                else:
-                    self.get_logger().error("Failed to switch to joint trajectory controller.")
-
+            if not service_name or not service_type:
+                raise ValueError("Missing serviceName or serviceType")
+            # Get or create service client
+            if service_name in self.service_clients:
+                service_client = self.service_clients[service_name]
+            else:
+                service_class = ROS2MessageFactory.get_message_class(service_type)
+                if service_class is None:
+                    raise ValueError(f"Unsupported service type: {service_type}")
+                service_client = self.create_client(service_class, service_name)
+                self.service_clients[service_name] = service_client
+            # Wait for service to be available
+            if not service_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().error(f"Service {service_name} not available")
+                asyncio.create_task(self.send_feedback({
+                    'packetType': 'ros2_service_response',
+                    'requestId': request_id,
+                    'success': False,
+                    'response': {'error': f'Service {service_name} not available'}
+                }))
+                return
             # Send service response
-            asyncio.create_task(self.send_feedback({
-                'packetType': 'ros2_service_response',
-                'requestId': request_id,
-                'success': success,
-                'response': {'result': 'Service call completed'}
-            }))
+            request_msg = ROS2MessageFactory.create_message(service_type + 'Request', request_data)
+            self.get_logger().info(f"Calling service {service_name} with request: {request_data}")
+            future = service_client.call_async(request_msg)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            if future.result() is not None:
+                response_msg = future.result()
+                # Convert response message to dict
+                response_dict = {}
+                for field in response_msg.get_fields_and_field_types().keys():
+                    response_dict[field] = getattr(response_msg, field)
+                self.get_logger().info(f"Service {service_name} response: {response_dict}")
+                asyncio.create_task(self.send_feedback({
+                    'packetType': 'ros2_service_response',
+                    'requestId': request_id,
+                    'success': True,
+                    'response': response_dict
+                }))
+                return
+            else:
+                self.get_logger().error(f"Service {service_name} call failed or no response")
+                asyncio.create_task(self.send_feedback({
+                    'packetType': 'ros2_service_response',
+                    'requestId': request_id,
+                    'success': False,
+                    'response': {'error': 'Service call failed or no response'}
+                }))
+                return
             
         except Exception as e:
             self.get_logger().error(f"Error handling service call: {e}")
+    
+    def handle_ros2_action_send_goal(self, packet: Dict[str, Any]):
+        """Handle ROS2 action send goal request"""
+        self.get_logger().info(f"Received action send goal packet: {packet}")
+        try:
+            action_name = packet.get('actionName', '')
+            action_type = packet.get('actionType', '')
+            goal_data = packet.get('goal', {})
+            goal_id = packet.get('goalId', '')
+            
+            if not action_name or not action_type:
+                raise ValueError("Missing actionName or actionType")
+            
+            # Get or create action client
+            action_client = self.get_or_create_action_client(action_name, action_type)
+            
+            if action_client is None:
+                raise ValueError(f"Failed to create action client for {action_name}")
+            
+            # Wait for action server to be available
+            if not action_client.wait_for_server(timeout_sec=5.0):
+                self.get_logger().error(f"Action server {action_name} not available")
+                asyncio.create_task(self.send_feedback({
+                    'packetType': 'ros2_action_response',
+                    'goalId': goal_id,
+                    'status': 'server_not_available',
+                    'message': f'Action server {action_name} not available'
+                }))
+                return
+            
+            # Get the goal message type
+            action_class = ROS2MessageFactory.get_message_class(action_type)
+            if action_class is None:
+                raise ValueError(f"Unsupported action type: {action_type}")
+            
+            # Create goal message
+            goal_msg = action_class.Goal()
+            ROS2MessageFactory._populate_message(goal_msg, goal_data)
+            
+            # Send goal asynchronously
+            self.get_logger().info(f"Sending goal to action {action_name}")
+            send_goal_future = action_client.send_goal_async(
+                goal_msg,
+                feedback_callback=lambda feedback_msg: self._action_feedback_callback(
+                    goal_id, feedback_msg
+                )
+            )
+            send_goal_future.add_done_callback(
+                lambda future: self._action_goal_response_callback(goal_id, future)
+            )
+            
+        except Exception as e:
+            self.error_count += 1
+            self.get_logger().error(f"Error handling action send goal: {e}")
+            # Send error feedback
+            asyncio.create_task(self.send_feedback({
+                'packetType': 'ros2_action_response',
+                'goalId': packet.get('goalId', ''),
+                'status': 'error',
+                'message': str(e)
+            }))
+    
+    def get_or_create_action_client(self, action_name: str, action_type: str) -> Optional[ActionClient]:
+        """Get or create action client"""
+        key = f"{action_name}:{action_type}"
+        
+        if key in self.action_clients:
+            return self.action_clients[key]
+        
+        # Create new action client
+        action_class = ROS2MessageFactory.get_message_class(action_type)
+        if action_class is None:
+            self.get_logger().error(f"Unsupported action type: {action_type}")
+            return None
+        
+        try:
+            action_client = ActionClient(self, action_class, action_name)
+            self.action_clients[key] = action_client
+            self.get_logger().info(f"Created action client: {action_name} ({action_type})")
+            return action_client
+        except Exception as e:
+            self.get_logger().error(f"Failed to create action client: {e}")
+            return None
+    
+    def _action_feedback_callback(self, goal_id: str, feedback_msg):
+        """Action feedback callback"""
+        try:
+            self.get_logger().info(f"Action feedback for goal {goal_id}: {feedback_msg.feedback}")
+            # Send feedback to LiveKit
+            asyncio.create_task(self.send_feedback({
+                'packetType': 'ros2_action_feedback',
+                'goalId': goal_id,
+                'feedback': str(feedback_msg.feedback)
+            }))
+        except Exception as e:
+            self.get_logger().error(f"Error in action feedback callback: {e}")
+    
+    def _action_goal_response_callback(self, goal_id: str, future):
+        """Action goal response callback"""
+        try:
+            goal_handle = future.result()
+            if not goal_handle.accepted:
+                self.get_logger().info(f"Goal {goal_id} rejected")
+                asyncio.create_task(self.send_feedback({
+                    'packetType': 'ros2_action_response',
+                    'goalId': goal_id,
+                    'status': 'rejected',
+                    'message': 'Goal was rejected by action server'
+                }))
+                return
+            
+            self.get_logger().info(f"Goal {goal_id} accepted")
+            # Store goal handle
+            self.action_goal_handles[goal_id] = goal_handle
+            
+            # Send acceptance feedback
+            asyncio.create_task(self.send_feedback({
+                'packetType': 'ros2_action_response',
+                'goalId': goal_id,
+                'status': 'accepted',
+                'message': 'Goal accepted by action server'
+            }))
+            
+            # Wait for result
+            get_result_future = goal_handle.get_result_async()
+            get_result_future.add_done_callback(
+                lambda result_future: self._action_result_callback(goal_id, result_future)
+            )
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in action goal response callback: {e}")
+            asyncio.create_task(self.send_feedback({
+                'packetType': 'ros2_action_response',
+                'goalId': goal_id,
+                'status': 'error',
+                'message': str(e)
+            }))
+    
+    def _action_result_callback(self, goal_id: str, future):
+        """Action result callback"""
+        try:
+            result = future.result()
+            self.get_logger().info(f"Action result for goal {goal_id}: {result.result}")
+            
+            # Remove goal handle
+            if goal_id in self.action_goal_handles:
+                del self.action_goal_handles[goal_id]
+            
+            # Send result to LiveKit
+            asyncio.create_task(self.send_feedback({
+                'packetType': 'ros2_action_result',
+                'goalId': goal_id,
+                'status': 'succeeded',
+                'result': str(result.result)
+            }))
+        except Exception as e:
+            self.get_logger().error(f"Error in action result callback: {e}")
+            asyncio.create_task(self.send_feedback({
+                'packetType': 'ros2_action_result',
+                'goalId': goal_id,
+                'status': 'error',
+                'message': str(e)
+            }))
     
     def get_or_create_publisher(self, topic_name: str, message_type: str) -> Publisher:
         """Get or create publisher"""
@@ -496,60 +653,6 @@ class LiveKitROS2Bridge(Node):
             ),
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
-
-    def get_active_controllers(self) -> Optional[List[str]]:
-        """List current controllers and their states."""
-        if not self.controller_list_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().error("Controller list service not available")
-            return None
-        request = ListControllers.Request()
-        future = self.controller_list_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        if future.result() is not None:
-            controllers = future.result().controller
-            active_controllers = [c.name for c in controllers if c.state == 'active']
-            self.get_logger().info(f"Active controllers: {active_controllers}")
-            return active_controllers
-        self.get_logger().error("Failed to get controller list or no response")
-        return None
-
-    def switch_controllers(self, active_controllers: List[str], deactivate_controllers: List[str]):
-        """Switch the active arm controller."""
-        # check if the controller has already been activated
-        current_active = self.get_active_controllers()
-        if not current_active:
-            self.get_logger().error("No active controllers found")
-            return False
-        if all(ac in current_active for ac in active_controllers):
-            self.get_logger().info(f"Controllers {active_controllers} already active, no switch needed")
-            return True
-
-        # send service call to switch arm controller
-        request = SwitchController.Request()
-        request.activate_controllers = active_controllers
-        request.deactivate_controllers = deactivate_controllers
-        request.strictness = SwitchController.Request.BEST_EFFORT
-        future = self.controller_switch_client.call_async(request)
-        self.get_logger().info(f"Switching controllers: {deactivate_controllers} -> {active_controllers}")
-        if future.result() is not None and future.result().ok:
-            self.get_logger().info(f"Controller switch result: {future.result().ok}")
-            return True
-        self.get_logger().error("Controller switch failed or no response")
-        return False
-
-    def switch_to_joint_trajectory_controller(self):
-        """Switch to joint trajectory controller."""
-        return self.switch_controllers(
-            active_controllers=['z1_arm_trajectory_controller'],
-            deactivate_controllers=['z1_arm_forward_position_controller']
-        )
-
-    def switch_to_forward_position_controller(self):
-        """Switch to forward position controller."""
-        return self.switch_controllers(
-            active_controllers=['z1_arm_forward_position_controller'],
-            deactivate_controllers=['z1_arm_trajectory_controller']
-        )
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
