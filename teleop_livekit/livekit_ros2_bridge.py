@@ -210,6 +210,16 @@ class LiveKitROS2Bridge(Node):
         self.error_count = 0
         self.get_logger().info(f"LiveKit ROS2 bridge started: {node_name}")
     
+    def _submit_to_loop(self, coro: asyncio.coroutines):
+        """Submit coroutine to asyncio loop"""
+        if self._asyncio_loop is None:
+            self.get_logger().error("No asyncio event loop available to run coroutine")
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(coro, self._asyncio_loop)
+        except Exception as e:
+            self.get_logger().error(f"Failed to submit coroutine to loop: {e}")
+
     def on_data_received(self, data: rtc.DataPacket):
         """LiveKit data packet received callback"""
         try:
@@ -276,7 +286,7 @@ class LiveKitROS2Bridge(Node):
             # Wait for service to be available
             if not service_client.wait_for_service(timeout_sec=5.0):
                 self.get_logger().error(f"Service {service_name} not available")
-                asyncio.create_task(self.send_feedback({
+                self._submit_to_loop(self.send_feedback({
                     'packetType': 'ros2_service_response',
                     'requestId': request_id,
                     'success': False,
@@ -295,7 +305,7 @@ class LiveKitROS2Bridge(Node):
                 for field in response_msg.get_fields_and_field_types().keys():
                     response_dict[field] = getattr(response_msg, field)
                 self.get_logger().info(f"Service {service_name} response: {response_dict}")
-                asyncio.create_task(self.send_feedback({
+                self._submit_to_loop(self.send_feedback({
                     'packetType': 'ros2_service_response',
                     'requestId': request_id,
                     'success': True,
@@ -304,7 +314,7 @@ class LiveKitROS2Bridge(Node):
                 return
             else:
                 self.get_logger().error(f"Service {service_name} call failed or no response")
-                asyncio.create_task(self.send_feedback({
+                self._submit_to_loop(self.send_feedback({
                     'packetType': 'ros2_service_response',
                     'requestId': request_id,
                     'success': False,
@@ -336,7 +346,7 @@ class LiveKitROS2Bridge(Node):
             # Wait for action server to be available
             if not action_client.wait_for_server(timeout_sec=5.0):
                 self.get_logger().error(f"Action server {action_name} not available")
-                asyncio.create_task(self.send_feedback({
+                self._submit_to_loop(self.send_feedback({
                     'packetType': 'ros2_action_response',
                     'goalId': goal_id,
                     'status': 'server_not_available',
@@ -369,7 +379,7 @@ class LiveKitROS2Bridge(Node):
             self.error_count += 1
             self.get_logger().error(f"Error handling action send goal: {e}")
             # Send error feedback
-            asyncio.create_task(self.send_feedback({
+            self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_response',
                 'goalId': packet.get('goalId', ''),
                 'status': 'error',
@@ -403,7 +413,7 @@ class LiveKitROS2Bridge(Node):
         try:
             self.get_logger().info(f"Action feedback for goal {goal_id}: {feedback_msg.feedback}")
             # Send feedback to LiveKit
-            asyncio.create_task(self.send_feedback({
+            self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_feedback',
                 'goalId': goal_id,
                 'feedback': str(feedback_msg.feedback)
@@ -413,11 +423,12 @@ class LiveKitROS2Bridge(Node):
     
     def _action_goal_response_callback(self, goal_id: str, future):
         """Action goal response callback"""
+        self.get_logger().info(f"Action goal response for goal {goal_id}")  
         try:
             goal_handle = future.result()
             if not goal_handle.accepted:
                 self.get_logger().info(f"Goal {goal_id} rejected")
-                asyncio.create_task(self.send_feedback({
+                self._submit_to_loop(self.send_feedback({
                     'packetType': 'ros2_action_response',
                     'goalId': goal_id,
                     'status': 'rejected',
@@ -430,7 +441,7 @@ class LiveKitROS2Bridge(Node):
             self.action_goal_handles[goal_id] = goal_handle
             
             # Send acceptance feedback
-            asyncio.create_task(self.send_feedback({
+            self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_response',
                 'goalId': goal_id,
                 'status': 'accepted',
@@ -463,7 +474,7 @@ class LiveKitROS2Bridge(Node):
                 del self.action_goal_handles[goal_id]
             
             # Send result to LiveKit
-            asyncio.create_task(self.send_feedback({
+            self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_result',
                 'goalId': goal_id,
                 'status': 'succeeded',
@@ -471,7 +482,7 @@ class LiveKitROS2Bridge(Node):
             }))
         except Exception as e:
             self.get_logger().error(f"Error in action result callback: {e}")
-            asyncio.create_task(self.send_feedback({
+            self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_result',
                 'goalId': goal_id,
                 'status': 'error',
