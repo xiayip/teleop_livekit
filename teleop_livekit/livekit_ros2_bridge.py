@@ -175,21 +175,6 @@ class LiveKitROS2Bridge(Node):
             ByteMultiArray, '/compressed_pointcloud', self.compressed_pointcloud_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
-        self.offset_pose_subscriber = self.create_subscription(  # covert offset pose to absolute ee pose
-            PoseStamped, '/ee_offset_pose', self.offset_pose_subscriber_callback,
-            qos_profile=rclpy.qos.QoSProfile(depth=1)
-        )
-        self.ee_pose_publisher = self.create_publisher(
-            PoseStamped, '/servo_node/pose_target_cmds', QoSProfile(depth=10)
-        )
-        # debug
-        self.debug_publisher = self.create_publisher(PoseStamped, '/debug/ee_pose', 10)
-        # log init ee pose Transform
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
-        self.ee_frame = 'link_grasp_center'
-        self.base_frame = 'z1_arm'
-        self._init_ee2base = None
         # QoS configuration
         self.default_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -621,35 +606,6 @@ class LiveKitROS2Bridge(Node):
             self.get_logger().error(f"Failed to publish pointcloud data: {e}")
             return False
         return True
-        
-    def offset_pose_subscriber_callback(self, msg: PoseStamped):
-        if not self._ensure_init_pose():
-            self.get_logger().error("Initial pose not set, cannot apply offset")
-            return
-        # self.get_logger().info(f"Received offset pose: {msg.pose}")
-        new_ee_pose = do_transform_pose(msg.pose, self._init_ee2base)
-        # Build PoseStamped
-        ee_pose_msg = PoseStamped()
-        ee_pose_msg.header = Header()
-        ee_pose_msg.header.stamp = self.get_clock().now().to_msg()
-        ee_pose_msg.header.frame_id = self.base_frame
-        ee_pose_msg.pose = new_ee_pose
-        self.ee_pose_publisher.publish(ee_pose_msg)
-
-    def _ensure_init_pose(self, force: bool = False):
-        """Capture the initial absolute pose of ee_frame in base_frame using TF."""
-        if self._init_ee2base is not None and not force:
-            return True
-        try:
-            # Store as tuple for fast access: (px,py,pz, qx,qy,qz,qw)
-            self._init_ee2base = self.tf_buffer.lookup_transform(self.base_frame, self.ee_frame, rclpy.time.Time(), timeout=RclpyDuration(seconds=1.0))
-            self.get_logger().info(
-                f"[PoseHandler] Captured init_pose of {self.ee_frame} in {self.base_frame}: "
-                f"Transform: {self._init_ee2base.transform.translation}, Rotation: {self._init_ee2base.transform.rotation}")
-            return True
-        except Exception as e:
-            self.get_logger().error(f"[PoseHandler] Failed to capture init_pose via TF: {e}")
-            return False
         
     async def create_video_track(self, width: int, height: int, fps: int):
         """Create and publish LiveKit video track."""
