@@ -41,38 +41,8 @@ from std_msgs.msg import ByteMultiArray
 class ROS2MessageFactory:
     """ROS2 message factory class"""
     
-    # Message type mapping
-    MESSAGE_TYPE_MAP = {
-        'std_msgs/msg/String': String,
-        'std_msgs/msg/Int8': Int8,
-        'std_msgs/msg/UInt8': UInt8,
-        'std_msgs/msg/Int16': Int16,
-        'std_msgs/msg/UInt16': UInt16,
-        'std_msgs/msg/Int32': Int32,
-        'std_msgs/msg/Int64': Int64,
-        'std_msgs/msg/UInt64': UInt64,
-        'std_msgs/msg/Float32': Float32,
-        'std_msgs/msg/Float64': Float64,
-        
-        'geometry_msgs/msg/Twist': Twist,
-        'geometry_msgs/msg/TwistStamped': TwistStamped,
-        'geometry_msgs/msg/PoseStamped': PoseStamped,
-        'geometry_msgs/msg/Pose': Pose,
-        'geometry_msgs/msg/Point': Point,
-        'geometry_msgs/msg/Quaternion': Quaternion,
-        'geometry_msgs/msg/Vector3': Vector3,
-        'sensor_msgs/msg/Image': Image,
-        'sensor_msgs/msg/CompressedImage': CompressedImage,
-        'sensor_msgs/msg/JointState': JointState,
-        'nav_msgs/msg/Odometry': Odometry,
-    }
-    
     @classmethod
     def get_message_class(cls, message_type: str):
-        """Get message class based on message type string"""
-        if message_type in cls.MESSAGE_TYPE_MAP:
-            return cls.MESSAGE_TYPE_MAP[message_type]
-        
         # Try dynamic import
         try:
             # Parse message type e.g.: "my_package/msg/CustomMsg"
@@ -113,7 +83,6 @@ class ROS2MessageFactory:
                             now = rclpy.clock.Clock().now().to_msg()
                             attr.sec = now.sec
                             attr.nanosec = now.nanosec
-                            print(f"Timestamp updated: {attr.sec}.{attr.nanosec}")
                             continue
                     # Nested message
                     cls._populate_message(attr, value)
