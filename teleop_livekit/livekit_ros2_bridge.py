@@ -109,6 +109,41 @@ class ROS2MessageFactory:
                     else:
                         setattr(msg, key, value)
 
+    @classmethod
+    def message_to_json(cls, msg: Any) -> str:
+        """Convert ROS2 message instance to JSON string"""
+        return json.dumps(cls.message_to_dict(msg))
+
+    @classmethod
+    def message_to_dict(cls, msg: Any) -> Any:
+        """Convert ROS2 message instance to a JSON-serializable structure"""
+        if msg is None:
+            return None
+        if hasattr(msg, 'get_fields_and_field_types'):
+            serialized = {}
+            for field_name in msg.get_fields_and_field_types().keys():
+                value = getattr(msg, field_name)
+                serialized[field_name] = cls._convert_value(value)
+            return serialized
+        return cls._convert_value(msg)
+
+    @classmethod
+    def _convert_value(cls, value: Any) -> Any:
+        """Convert individual field to JSON-serializable value"""
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return list(value)
+        if isinstance(value, (list, tuple)):
+            return [cls._convert_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: cls._convert_value(item) for key, item in value.items()}
+        if hasattr(value, 'get_fields_and_field_types'):
+            return cls.message_to_dict(value)
+        return str(value)
+
 
 @dataclass
 class PublisherInfo:
@@ -144,6 +179,10 @@ class LiveKitROS2Bridge(Node):
             ByteMultiArray, '/compressed_pointcloud', self.compressed_pointcloud_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
+        self.odometry_subscriber = self.create_subscription(
+            Odometry, '/odin1/odometry', self.odometry_callback,
+            qos_profile=rclpy.qos.QoSProfile(depth=1)
+        )
         # QoS configuration
         self.default_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -160,6 +199,8 @@ class LiveKitROS2Bridge(Node):
         self._is_sending_pointcloud = False
         # Continuous id for pointcloud messages
         self._pointcloud_seq = 0
+        self._odometry_publish_interval = 0.2
+        self._last_odometry_publish_time = 0.0
         # Statistics
         self.error_count = 0
         self.get_logger().info(f"LiveKit ROS2 bridge started: {node_name}")
@@ -410,7 +451,7 @@ class LiveKitROS2Bridge(Node):
             
         except Exception as e:
             self.get_logger().error(f"Error in action goal response callback: {e}")
-            asyncio.create_task(self.send_feedback({
+            asyncio._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_response',
                 'goalId': goal_id,
                 'status': 'error',
@@ -589,6 +630,26 @@ class LiveKitROS2Bridge(Node):
             ),
         )
         self.get_logger().info("Published LiveKit track (will only send frames when someone is watching)")
+
+    def odometry_callback(self, msg: Odometry):
+        # send to livekit as json
+        try:
+            now = time.monotonic()
+            if now - self._last_odometry_publish_time < self._odometry_publish_interval:
+                return
+            self._last_odometry_publish_time = now
+            # only send pose
+            pose_msg = msg.pose.pose
+            json_str = ROS2MessageFactory.message_to_json(pose_msg)
+            # self.get_logger().info(f"Sending odometry pose data: {json_str}")
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_message',
+                'topicName': '/pose',
+                'messageType': 'geometry_msgs/msg/Pose',
+                'data': json.loads(json_str)
+            }))
+        except Exception as e:
+            self.get_logger().error(f"Failed to send odometry data: {e}")
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
