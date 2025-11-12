@@ -183,6 +183,10 @@ class LiveKitROS2Bridge(Node):
             Odometry, '/odin1/odometry', self.odometry_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
+        self.joint_state_subscriber = self.create_subscription(
+            JointState, '/joint_states', self.joint_state_callback,
+            qos_profile=rclpy.qos.QoSProfile(depth=1)
+        )
         # QoS configuration
         self.default_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -199,8 +203,12 @@ class LiveKitROS2Bridge(Node):
         self._is_sending_pointcloud = False
         # Continuous id for pointcloud messages
         self._pointcloud_seq = 0
-        self._odometry_publish_interval = 0.2
+        # odometry publish interval
+        self._odometry_publish_interval = 0.2 # 5 Hz
         self._last_odometry_publish_time = 0.0
+        # joint state publish interval
+        self._joint_state_publish_interval = 0.2 # 5 Hz
+        self._last_joint_state_publish_time = 0.0
         # Statistics
         self.error_count = 0
         self.get_logger().info(f"LiveKit ROS2 bridge started: {node_name}")
@@ -451,7 +459,7 @@ class LiveKitROS2Bridge(Node):
             
         except Exception as e:
             self.get_logger().error(f"Error in action goal response callback: {e}")
-            asyncio._submit_to_loop(self.send_feedback({
+            self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_action_response',
                 'goalId': goal_id,
                 'status': 'error',
@@ -650,6 +658,40 @@ class LiveKitROS2Bridge(Node):
             }))
         except Exception as e:
             self.get_logger().error(f"Failed to send odometry data: {e}")
+    
+    def joint_state_callback(self, msg: JointState):
+        # send to livekit as json
+        try:
+            now = time.monotonic()
+            if now - self._last_joint_state_publish_time < self._joint_state_publish_interval:
+                return
+            self._last_joint_state_publish_time = now
+            # only send joint1 ~ joint6 positions
+            allowed_joint_names = {
+                'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'
+            }
+            filtered_joint_state = JointState()
+            filtered_joint_state.header = msg.header
+            for idx, name in enumerate(msg.name):
+                if name not in allowed_joint_names:
+                    continue
+                filtered_joint_state.name.append(name)
+                if idx < len(msg.position):
+                    filtered_joint_state.position.append(msg.position[idx])
+            if not filtered_joint_state.name:
+                return
+            json_str = ROS2MessageFactory.message_to_json(filtered_joint_state)
+            # self.get_logger().info(f"Sending joint state data: {json_str}")
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_message',
+                'topicName': '/joint_states',
+                'messageType': 'sensor_msgs/msg/JointState',
+                'data': json.loads(json_str)
+            }))
+            # debug
+            # self.get_logger().info(f"Sent joint state data: {json_str}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to send joint state data: {e}")
 
 class LiveKitROS2BridgeManager:
     """LiveKit ROS2 bridge manager"""
