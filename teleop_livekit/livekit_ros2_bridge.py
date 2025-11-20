@@ -206,9 +206,14 @@ class LiveKitROS2Bridge(Node):
         # odometry publish interval
         self._odometry_publish_interval = 0.2 # 5 Hz
         self._last_odometry_publish_time = 0.0
+        self._last_sent_pose = None  # Store last sent pose for change detection
+        self._pose_position_threshold = 0.001  # 1mm change threshold
+        self._pose_orientation_threshold = 0.01  # ~0.57 degree change threshold
         # joint state publish interval
         self._joint_state_publish_interval = 0.2 # 5 Hz
         self._last_joint_state_publish_time = 0.0
+        self._last_sent_joint_positions = None  # Store last sent joint positions
+        self._joint_position_threshold = 0.001  # ~0.057 degree change threshold for joints
         # Statistics
         self.error_count = 0
         self.get_logger().info(f"LiveKit ROS2 bridge started: {node_name}")
@@ -645,9 +650,32 @@ class LiveKitROS2Bridge(Node):
             now = time.monotonic()
             if now - self._last_odometry_publish_time < self._odometry_publish_interval:
                 return
-            self._last_odometry_publish_time = now
-            # only send pose
+            
+            # Extract current pose
             pose_msg = msg.pose.pose
+            
+            # Check if pose has changed significantly
+            if self._last_sent_pose is not None:
+                pos_delta = (
+                    abs(pose_msg.position.x - self._last_sent_pose.position.x) +
+                    abs(pose_msg.position.y - self._last_sent_pose.position.y) +
+                    abs(pose_msg.position.z - self._last_sent_pose.position.z)
+                )
+                ori_delta = (
+                    abs(pose_msg.orientation.x - self._last_sent_pose.orientation.x) +
+                    abs(pose_msg.orientation.y - self._last_sent_pose.orientation.y) +
+                    abs(pose_msg.orientation.z - self._last_sent_pose.orientation.z) +
+                    abs(pose_msg.orientation.w - self._last_sent_pose.orientation.w)
+                )
+                
+                # If change is below threshold, skip sending
+                if pos_delta < self._pose_position_threshold and ori_delta < self._pose_orientation_threshold:
+                    return
+            
+            # Update last sent time and pose
+            self._last_odometry_publish_time = now
+            self._last_sent_pose = pose_msg
+            
             json_str = ROS2MessageFactory.message_to_json(pose_msg)
             # self.get_logger().info(f"Sending odometry pose data: {json_str}")
             self._submit_to_loop(self.send_feedback({
@@ -665,7 +693,7 @@ class LiveKitROS2Bridge(Node):
             now = time.monotonic()
             if now - self._last_joint_state_publish_time < self._joint_state_publish_interval:
                 return
-            self._last_joint_state_publish_time = now
+            
             # only send joint1 ~ joint6 positions
             allowed_joint_names = {
                 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'
@@ -680,6 +708,23 @@ class LiveKitROS2Bridge(Node):
                     filtered_joint_state.position.append(msg.position[idx])
             if not filtered_joint_state.name:
                 return
+            
+            # Check if joint positions have changed significantly
+            if self._last_sent_joint_positions is not None:
+                if len(self._last_sent_joint_positions) == len(filtered_joint_state.position):
+                    position_delta = sum(
+                        abs(curr - last) 
+                        for curr, last in zip(filtered_joint_state.position, self._last_sent_joint_positions)
+                    )
+                    
+                    # If change is below threshold, skip sending
+                    if position_delta < self._joint_position_threshold:
+                        return
+            
+            # Update last sent time and positions
+            self._last_joint_state_publish_time = now
+            self._last_sent_joint_positions = list(filtered_joint_state.position)
+            
             json_str = ROS2MessageFactory.message_to_json(filtered_joint_state)
             # self.get_logger().info(f"Sending joint state data: {json_str}")
             self._submit_to_loop(self.send_feedback({
