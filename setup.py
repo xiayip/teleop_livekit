@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'teleop_livekit = teleop_livekit.teleop_livekit:run',
+            'teleop_bridge = teleop_livekit.teleop_manager:main',
         ],
     },
 )
