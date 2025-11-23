@@ -81,7 +81,7 @@ def generate_launch_description():
     # LiveKit
     livekit_node = Node(
         package='teleop_livekit',
-        executable='teleop_livekit',
+        executable='teleop_bridge',
         name='livekit_image_publisher',
         output='screen',
         remappings=[
@@ -89,4 +89,8 @@ def generate_launch_description():
         ]
     )
 
-    return (launch.LaunchDescription([rgb_image_container] + [point_cloud_container] + [livekit_node]))
+    return (launch.LaunchDescription(
+                                     [rgb_image_container] + 
+                                     [point_cloud_container] + 
+                                     [livekit_node])
+                                     )

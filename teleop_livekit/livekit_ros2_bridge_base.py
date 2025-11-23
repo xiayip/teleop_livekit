@@ -26,16 +26,6 @@ from rclpy.client import Client
 from rclpy.action import ActionClient
 from rclpy.action.client import ClientGoalHandle
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from rclpy.duration import Duration as RclpyDuration
-
-# Common ROS2 message types
-from std_msgs.msg import String, Float64, Float32, Int16, Int32, UInt16, UInt8, Int8, UInt64, Int64, Header
-from geometry_msgs.msg import Twist, TwistStamped, PoseStamped, Pose, Point, Quaternion, Vector3
-from sensor_msgs.msg import Image, CompressedImage, JointState
-from nav_msgs.msg import Odometry
-from builtin_interfaces.msg import Time, Duration as MsgDuration
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
 
 class ROS2MessageFactory:
     """ROS2 message factory for dynamic message type handling"""
@@ -60,63 +50,88 @@ class ROS2MessageFactory:
     def json_to_message(cls, message_type: str, data: Dict[str, Any]):
         """Convert JSON dict to ROS2 message"""
         message_class = cls.get_message_class(message_type)
+        if message_class is None:
+            raise ValueError(f"Unsupported message type: {message_type}")
+        
         msg = message_class()
         cls._populate_message(msg, data)
         return msg
     
     @classmethod
     def _populate_message(cls, msg, data: Dict[str, Any]):
-        """Recursively populate message fields from dict"""
+        """Populate message data"""
         for key, value in data.items():
             if not hasattr(msg, key):
                 continue
-            
             attr = getattr(msg, key)
             
             if isinstance(value, dict):
+                # if time stamp detected, use local time
+                if key == 'stamp':
+                    if hasattr(attr, 'sec') and hasattr(attr, 'nanosec'):
+                        now = rclpy.clock.Clock().now().to_msg()
+                        attr.sec = now.sec
+                        attr.nanosec = now.nanosec
+                        continue
+                # Nested message
                 cls._populate_message(attr, value)
             elif isinstance(value, list):
-                if hasattr(attr, 'append'):
-                    for item in value:
-                        if isinstance(item, dict):
-                            sub_msg = type(attr[0])() if len(attr) > 0 else None
-                            if sub_msg:
-                                cls._populate_message(sub_msg, item)
-                                attr.append(sub_msg)
-                        else:
-                            attr.append(item)
+                # Array field
+                if hasattr(attr, 'clear'):
+                    attr.clear()
+                if hasattr(attr, 'extend'):
+                    attr.extend(value)
                 else:
                     setattr(msg, key, value)
             else:
-                setattr(msg, key, value)
+                # Type conversion handling
+                attr_type = type(getattr(msg, key))
+                if attr_type == float and isinstance(value, (int, str)):
+                    # Convert integer or string to float
+                    setattr(msg, key, float(value))
+                elif attr_type == int and isinstance(value, (float, str)):
+                    # Convert float or string to integer
+                    setattr(msg, key, int(value))
+                elif attr_type == bool and isinstance(value, (int, str)):
+                    # Convert integer or string to boolean
+                    setattr(msg, key, bool(value))
+                else:
+                    setattr(msg, key, value)
     
     @classmethod
     def message_to_json(cls, msg) -> str:
         """Convert ROS2 message to JSON string"""
-        return cls._message_to_dict_json(msg)
+        return json.dumps(cls._message_to_dict_json(msg))
     
     @classmethod
     def _message_to_dict_json(cls, msg) -> str:
-        """Convert message to JSON with special handling"""
-        result = {}
-        
-        for field in msg.get_fields_and_field_types().keys():
-            value = getattr(msg, field)
-            
-            if hasattr(value, 'get_fields_and_field_types'):
-                result[field] = json.loads(cls._message_to_dict_json(value))
-            elif isinstance(value, list):
-                result[field] = [
-                    json.loads(cls._message_to_dict_json(item)) 
-                    if hasattr(item, 'get_fields_and_field_types') 
-                    else item 
-                    for item in value
-                ]
-            else:
-                result[field] = value
-        
-        return json.dumps(result)
-
+        """Convert ROS2 message instance to a JSON-serializable structure"""
+        if msg is None:
+            return None
+        if hasattr(msg, 'get_fields_and_field_types'):
+            serialized = {}
+            for field_name in msg.get_fields_and_field_types().keys():
+                value = getattr(msg, field_name)
+                serialized[field_name] = cls._convert_value(value)
+            return serialized
+        return cls._convert_value(msg)
+    
+    @classmethod
+    def _convert_value(cls, value: Any) -> Any:
+        """Convert individual field to JSON-serializable value"""
+        if value is None:
+            return None
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return list(value)
+        if isinstance(value, (list, tuple)):
+            return [cls._convert_value(item) for item in value]
+        if isinstance(value, dict):
+            return {key: cls._convert_value(item) for key, item in value.items()}
+        if hasattr(value, 'get_fields_and_field_types'):
+            return cls._message_to_dict_json(value)
+        return str(value)
 
 @dataclass
 class PublisherInfo:
@@ -265,23 +280,42 @@ class LiveKitROS2BridgeBase(Node):
     def handle_ros2_action_send_goal(self, packet: Dict[str, Any]):
         """Handle ROS2 action goal from LiveKit"""
         try:
-            action_name = packet['actionName']
-            action_type = packet['actionType']
-            goal_data = packet['goal']
-            action_id = packet.get('actionId', '')
+            action_name = packet.get('actionName', '')
+            action_type = packet.get('actionType', '')
+            goal_data = packet.get('goal', {})
+            goal_id = packet.get('goalId', '')
             
             # Get or create action client
             client = self._get_or_create_action_client(action_name, action_type)
+
+            if client is None:
+                raise ValueError(f"Failed to create action client for {action_name}")
+
+            # Wait for action server to be available
+            if not client.wait_for_server(timeout_sec=5.0):
+                self.get_logger().error(f"Action server {action_name} not available")
+                self._submit_to_loop(self.send_feedback({
+                    'packetType': 'ros2_action_response',
+                    'goalId': goal_id,
+                    'status': 'server_not_available',
+                    'message': f'Action server {action_name} not available'
+                }))
+                return
             
             # Create goal
-            goal_class = ROS2MessageFactory.get_message_class(action_type + '_Goal')
-            goal = goal_class()
-            ROS2MessageFactory._populate_message(goal, goal_data)
+            goal_class = ROS2MessageFactory.get_message_class(action_type)
+            if goal_class is None:
+                raise ValueError(f"Unsupported action type: {action_type}")
+            
+            # Create goal message
+            goal_msg = goal_class.Goal()
+            ROS2MessageFactory._populate_message(goal_msg, goal_data)
             
             # Send goal
-            send_goal_future = client.send_goal_async(goal)
+            self.get_logger().info(f"Sending goal to action {action_name}")
+            send_goal_future = client.send_goal_async(goal_msg)
             send_goal_future.add_done_callback(
-                lambda f: self._handle_action_goal_response(f, action_id, action_name)
+                lambda f: self._handle_action_goal_response(f, goal_id)
             )
             
         except Exception as e:
@@ -507,47 +541,90 @@ class LiveKitROS2BridgeBase(Node):
             
             self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_service_response',
-                'serviceName': service_name,
                 'requestId': request_id,
+                'serviceName': service_name,
                 'response': json.loads(response_json)
             }))
         except Exception as e:
             self.get_logger().error(f"Service call failed: {e}")
+
+    def handle_ros2_action_feedback(self, goal_id: str, feedback_msg):
+        """Action feedback callback"""
+        try:
+            self.get_logger().info(f"Action feedback for goal {goal_id}: {feedback_msg.feedback}")
+            # Send feedback to LiveKit
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_action_feedback',
+                'goalId': goal_id,
+                'feedback': str(feedback_msg.feedback)
+            }))
+        except Exception as e:
+            self.get_logger().error(f"Error in action feedback callback: {e}")
     
-    def _handle_action_goal_response(self, future, action_id: str, action_name: str):
-        """Handle action goal acceptance"""
+    def _handle_action_goal_response(self, future, goal_id: str):
+        """Action goal response callback"""
+        self.get_logger().info(f"Action goal response for goal {goal_id}")  
         try:
             goal_handle = future.result()
             if not goal_handle.accepted:
-                self.get_logger().warn(f"Action goal rejected: {action_name}")
+                self.get_logger().info(f"Goal {goal_id} rejected")
+                self._submit_to_loop(self.send_feedback({
+                    'packetType': 'ros2_action_response',
+                    'goalId': goal_id,
+                    'status': 'rejected',
+                    'message': 'Goal was rejected by action server'
+                }))
                 return
             
-            self.action_goal_handles[action_id] = goal_handle
+            self.get_logger().info(f"Goal {goal_id} accepted")
+            # Store goal handle
+            self.action_goal_handles[goal_id] = goal_handle
             
-            # Wait for result
-            result_future = goal_handle.get_result_async()
-            result_future.add_done_callback(
-                lambda f: self._handle_action_result(f, action_id, action_name)
-            )
-        except Exception as e:
-            self.get_logger().error(f"Action goal response failed: {e}")
-    
-    def _handle_action_result(self, future, action_id: str, action_name: str):
-        """Handle action result"""
-        try:
-            result = future.result().result
-            result_json = ROS2MessageFactory.message_to_json(result)
-            
+            # Send acceptance feedback
             self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_action_result',
-                'actionName': action_name,
-                'actionId': action_id,
-                'result': json.loads(result_json)
+                'packetType': 'ros2_action_response',
+                'goalId': goal_id,
+                'status': 'accepted',
+                'message': 'Goal accepted by action server'
             }))
             
-            # Clean up
-            if action_id in self.action_goal_handles:
-                del self.action_goal_handles[action_id]
-                
+            # Wait for result
+            get_result_future = goal_handle.get_result_async()
+            get_result_future.add_done_callback(
+                lambda result_future: self._handle_action_result(result_future, goal_id)
+            )
+            
         except Exception as e:
-            self.get_logger().error(f"Action result failed: {e}")
+            self.get_logger().error(f"Error in action goal response callback: {e}")
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_action_response',
+                'goalId': goal_id,
+                'status': 'error',
+                'message': str(e)
+            }))
+    
+    def _handle_action_result(self, future, goal_id: str):
+        """Action result callback"""
+        try:
+            result = future.result()
+            self.get_logger().info(f"Action result for goal {goal_id}: {result.result}")
+            
+            # Remove goal handle
+            if goal_id in self.action_goal_handles:
+                del self.action_goal_handles[goal_id]
+            
+            # Send result to LiveKit
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_action_result',
+                'goalId': goal_id,
+                'status': 'succeeded',
+                'result': str(result.result)
+            }))
+        except Exception as e:
+            self.get_logger().error(f"Error in action result callback: {e}")
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_action_result',
+                'goalId': goal_id,
+                'status': 'error',
+                'message': str(e)
+            }))

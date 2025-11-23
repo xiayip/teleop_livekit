@@ -118,8 +118,8 @@ def main():
     """Main entry point"""
     import sys
 
-    LIVEKIT_URL = "ws://47.111.148.68:7880"
-    LIVEKIT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE4MjY5NjU3MjUsImlzcyI6InVuaXgiLCJuYW1lIjoiY2FyIiwibmJmIjoxNzU0OTY1NzI1LCJzdWIiOiJjYXIiLCJ2aWRlbyI6eyJyb29tIjoiZGluZ2RhbmciLCJyb29tSm9pbiI6dHJ1ZX19.jrTpNOI-LMIosludj_Pf7MaYmZfJkTYBR0orzH1gkYA"
+    LIVEKIT_URL = "wss://livekit.zwind-robot.com"
+    LIVEKIT_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIxMjA2MzA5MzUsImlkZW50aXR5IjoiejEiLCJpc3MiOiJBUElIdEdUYVV2YzlGNHkiLCJuYW1lIjoiejEiLCJuYmYiOjE3NjA2MzQ1MzUsInN1YiI6InoxIiwidmlkZW8iOnsicm9vbSI6InRlc3Rfcm9vbSIsInJvb21Kb2luIjp0cnVlfX0.ewJqQezIdniNe3HB1pHyAClA6MrNjxVyCdcCjV97DSw"
     
     asyncio.run(main_async(LIVEKIT_URL, LIVEKIT_TOKEN))
 

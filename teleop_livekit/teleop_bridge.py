@@ -89,45 +89,38 @@ class TeleopBridge(LiveKitROS2BridgeBase):
         try:
             if self.video_source is None:
                 self._create_video_track()
+        
+            if len(self.room.remote_participants) == 0:
+                self.get_logger().info("No participants connected, skipping frame upload", throttle_duration_sec=5)
+                return False
             
             # Convert ROS Image to LiveKit VideoFrame
             # Assuming BGR8 encoding
-            if msg.encoding == 'bgr8':
-                frame = rtc.VideoFrame(
-                    width=msg.width,
-                    height=msg.height,
-                    type=rtc.VideoBufferType.RGBA,
-                    data=self._bgr8_to_rgba(msg.data, msg.width, msg.height)
-                )
+            frame_bytes = bytearray(msg.data)
+            frame = rtc.VideoFrame(
+                width=msg.width,
+                height=msg.height,
+                type=rtc.VideoBufferType.RGB24,
+                data=frame_bytes
+            )
+            if self.video_source is not None:
                 self.video_source.capture_frame(frame)
                 
         except Exception as e:
             self.get_logger().error(f"Error in image callback: {e}")
     
-    def _bgr8_to_rgba(self, bgr_data: bytes, width: int, height: int) -> bytes:
-        """Convert BGR8 to RGBA"""
-        import numpy as np
-        bgr = np.frombuffer(bgr_data, dtype=np.uint8).reshape((height, width, 3))
-        rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        rgba[:, :, 0] = bgr[:, :, 2]  # R
-        rgba[:, :, 1] = bgr[:, :, 1]  # G
-        rgba[:, :, 2] = bgr[:, :, 0]  # B
-        rgba[:, :, 3] = 255           # A
-        return rgba.tobytes()
-    
     def _create_video_track(self):
         """Create LiveKit video track"""
         self.video_source = rtc.VideoSource(640, 480)
-        video_track = rtc.LocalVideoTrack.create_video_track("camera", self.video_source)
-        
-        options = rtc.TrackPublishOptions()
-        options.source = rtc.TrackSource.SOURCE_CAMERA
-        
+        video_track = rtc.LocalVideoTrack.create_video_track("wrist_camera", self.video_source)
         self._submit_to_loop(
             self.room.local_participant.publish_track(
                 video_track,
-                options,
-                video_codec=rtc.VideoCodec.VP8,
+                rtc.TrackPublishOptions(
+                    source=rtc.TrackSource.SOURCE_CAMERA,
+                    video_encoding=rtc.VideoEncoding(max_framerate=30, max_bitrate=3_000_000),
+                    video_codec=rtc.VideoCodec.VP8,
+                ),
             )
         )
         self.get_logger().info("Video track published")
@@ -277,6 +270,7 @@ class TeleopBridge(LiveKitROS2BridgeBase):
             self._last_sent_joint_positions = list(filtered_state.position)
             
             json_str = ROS2MessageFactory.message_to_json(filtered_state)
+            
             self._submit_to_loop(self.send_feedback({
                 'packetType': 'ros2_message',
                 'topicName': '/joint_states',
