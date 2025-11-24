@@ -345,144 +345,37 @@ class LiveKitROS2BridgeBase(Node):
         chunk_size: int = 50000,
         on_done: Optional[Callable[[Optional[Exception]], None]] = None
     ):
-        """
-        Publish large binary payload to LiveKit with automatic chunking.
-        
-        LiveKit has size limits on data packets (~16KB). This method automatically
-        splits large payloads into chunks and sends them with metadata for reassembly.
-        
-        Args:
-            payload: Binary data to send
-            topic: LiveKit data channel topic name
-            message_id: Optional message ID for tracking (auto-generated if None)
-            chunk_size: Size of each chunk in bytes (default: 50KB)
-            on_done: Optional callback(exception) called when transfer completes
-        
-        Protocol:
-            For each chunk:
-            1. Send metadata to '<topic>:meta' with: {id, chunk, total}
-            2. Send chunk data to '<topic>'
-        
-        Thread-safe: Can be called from ROS callbacks
-        """
+        """Send bytes payload across LiveKit data channel safely from the ROS thread."""
         if self._asyncio_loop is None:
-            self.get_logger().error("No asyncio event loop available for large payload publish")
-            if on_done:
-                on_done(RuntimeError("No asyncio loop available"))
+            self.get_logger().error("No asyncio event loop available for LiveKit publish")
             return
-        
-        # Generate message ID if not provided
-        if message_id is None:
-            message_id = int(time.time() * 1000000)  # Microsecond timestamp
-        
-        async def _publish_chunks():
-            """Async coroutine to publish chunks sequentially"""
-            total_chunks = (len(payload) + chunk_size - 1) // chunk_size
-            
-            for chunk_idx in range(total_chunks):
-                start_pos = chunk_idx * chunk_size
-                end_pos = min(start_pos + chunk_size, len(payload))
-                chunk = payload[start_pos:end_pos]
-                
-                # Send metadata first
-                metadata = json.dumps({
-                    "id": message_id,
-                    "chunk": chunk_idx,
-                    "total": total_chunks,
-                    "size": len(chunk)
-                }).encode('utf-8')
-                
-                await self.room.local_participant.publish_data(
-                    metadata, 
-                    topic=f"{topic}:meta"
-                )
-                
-                # Then send chunk data
-                await self.room.local_participant.publish_data(
-                    chunk,
-                    topic=topic
-                )
-            
-            self.get_logger().debug(
-                f"Large payload sent: {len(payload)} bytes in {total_chunks} chunks to '{topic}'"
-            )
-        
-        # Submit to asyncio loop
+        def _publish_chunks():
+            async def _do_publish():
+                total_chunks = (len(payload) + chunk_size - 1) // chunk_size
+                for idx in range(0, len(payload), chunk_size):
+                    chunk = payload[idx: idx + chunk_size]
+                    metadata = json.dumps({
+                        "id": message_id,
+                        "chunk": idx // chunk_size,
+                        "total": total_chunks,
+                    }).encode("utf-8")
+                    await self.room.local_participant.publish_data(metadata, topic=f"{topic}:meta")
+                    await self.room.local_participant.publish_data(chunk, topic=topic)
+            return _do_publish()
         future = asyncio.run_coroutine_threadsafe(_publish_chunks(), self._asyncio_loop)
-        
-        # Attach completion callback
-        def _done_callback(f: asyncio.Future):
+        def _done_cb(f: asyncio.Future):
             exc: Optional[Exception] = None
             try:
                 f.result()
             except Exception as e:
                 exc = e
-                self.get_logger().error(
-                    f"Failed to publish large payload to '{topic}': {e}"
-                )
-            
-            # Call user callback if provided
+                self.get_logger().error(f"Failed to publish LiveKit data on topic '{topic}': {e}")
             if on_done is not None:
                 try:
                     on_done(exc)
                 except Exception as cb_e:
-                    self.get_logger().error(
-                        f"on_done callback error for topic '{topic}': {cb_e}"
-                    )
-        
-        future.add_done_callback(_done_callback)
-    
-    async def publish_large_payload_async(
-        self,
-        payload: bytes,
-        topic: str,
-        message_id: Optional[int] = None,
-        chunk_size: int = 50000
-    ):
-        """
-        Async version of publish_large_payload for use in async contexts.
-        
-        Args:
-            payload: Binary data to send
-            topic: LiveKit data channel topic name
-            message_id: Optional message ID for tracking
-            chunk_size: Size of each chunk in bytes
-        
-        Raises:
-            Exception if publish fails
-        """
-        if message_id is None:
-            message_id = int(time.time() * 1000000)
-        
-        total_chunks = (len(payload) + chunk_size - 1) // chunk_size
-        
-        for chunk_idx in range(total_chunks):
-            start_pos = chunk_idx * chunk_size
-            end_pos = min(start_pos + chunk_size, len(payload))
-            chunk = payload[start_pos:end_pos]
-            
-            # Send metadata
-            metadata = json.dumps({
-                "id": message_id,
-                "chunk": chunk_idx,
-                "total": total_chunks,
-                "size": len(chunk)
-            }).encode('utf-8')
-            
-            await self.room.local_participant.publish_data(
-                metadata,
-                topic=f"{topic}:meta"
-            )
-            
-            # Send chunk
-            await self.room.local_participant.publish_data(
-                chunk,
-                topic=topic
-            )
-        
-        self.get_logger().debug(
-            f"Large payload sent (async): {len(payload)} bytes in {total_chunks} chunks"
-        )
+                    self.get_logger().error(f"on_done callback error for topic '{topic}': {cb_e}")
+        future.add_done_callback(_done_cb)
     
     # ========== Dynamic Publisher/Client Management ==========
     

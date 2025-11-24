@@ -127,60 +127,38 @@ class TeleopBridge(LiveKitROS2BridgeBase):
     
     # ========== Point Cloud Streaming ==========
     
-    def compressed_pointcloud_callback(self, msg: ByteMultiArray):
-        """
-        Handle compressed point cloud messages.
-        
-        Uses large payload chunking from base class to handle
-        potentially large point cloud data (>16KB).
-        """
-        # Skip if previous send still in progress
-        if not self._send_lock.acquire(blocking=False):
-            self.get_logger().debug("Pointcloud send in progress, skipping frame")
-            return
-        
-        try:
-            # Convert data to bytes
-            payload = self._flatten_bytes(msg.data)
-            self.get_logger().debug(f"Received compressed pointcloud: {len(payload)} bytes")
-            
-            # Skip if no remote participants
-            if len(self.room.remote_participants) == 0:
-                self._send_lock.release()
-                return
-            
-            # Mark as sending
-            self._is_sending_pointcloud = True
-            self._pointcloud_seq += 1
-            msg_id = self._pointcloud_seq
-            
-            # Use base class large payload method with chunking
-            self.publish_large_payload(
-                payload=payload,
-                topic="pointcloud",
-                message_id=msg_id,
-                chunk_size=50000,  # 50KB chunks
-                on_done=self._on_pointcloud_send_done
-            )
-            
-        except Exception as e:
-            self.get_logger().error(f"Error in pointcloud callback: {e}")
-            self._is_sending_pointcloud = False
-            self._send_lock.release()
-    
     def _flatten_bytes(self, data) -> bytes:
-        """Convert various containers to flat bytes buffer"""
+        """Convert various containers to a flat bytes buffer."""
         if len(data) > 0 and isinstance(data[0], (bytes, bytearray, memoryview)):
             return b"".join(bytes(seg) for seg in data)
         return bytes(data)
     
     def _on_pointcloud_send_done(self, exc: Optional[Exception]):
-        """Callback when pointcloud transfer completes"""
         with self._send_lock:
             self._is_sending_pointcloud = False
-        
-        if exc:
-            self.get_logger().error(f"Pointcloud transfer failed: {exc}")
+
+    def compressed_pointcloud_callback(self, msg: ByteMultiArray):
+        """Process a ROS CompressedPointCloud2 message: send as chunked binary over LiveKit."""
+        try:
+            payload = self._flatten_bytes(msg.data)
+            self.get_logger().debug(f"Received compressed pointcloud of size {len(payload)} bytes")
+            if len(self.room.remote_participants) == 0:
+                return False
+            # Skip if a previous send is still in progress
+            self._pointcloud_seq += 1
+            with self._send_lock:
+                if self._is_sending_pointcloud:
+                    self.get_logger().debug("Pointcloud send in progress, skipping this frame")
+                    return False
+                self._is_sending_pointcloud = True
+                msg_id = self._pointcloud_seq
+            # Schedule chunked publish; flag will be reset in on_done
+            self._publish_large_payload(payload, topic="pointcloud", on_done=self._on_pointcloud_send_done, message_id=msg_id)
+        except Exception as e:
+            # Reset flag on error if we set it
+            self.get_logger().error(f"Failed to publish pointcloud data: {e}")
+            return False
+        return True
     
     # ========== Robot State Feedback with Change Detection ==========
     

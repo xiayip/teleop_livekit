@@ -82,7 +82,6 @@ def generate_launch_description():
     livekit_node = Node(
         package='teleop_livekit',
         executable='teleop_bridge',
-        name='livekit_image_publisher',
         output='screen',
         remappings=[
             ('/image_raw', '/color/image_raw'),
