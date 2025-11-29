@@ -153,7 +153,7 @@ class TeleopBridge(LiveKitROS2BridgeBase):
                 self._is_sending_pointcloud = True
                 msg_id = self._pointcloud_seq
             # Schedule chunked publish; flag will be reset in on_done
-            self._publish_large_payload(payload, topic="pointcloud", on_done=self._on_pointcloud_send_done, message_id=msg_id)
+            self.publish_large_payload(payload, topic="pointcloud", on_done=self._on_pointcloud_send_done, message_id=msg_id)
         except Exception as e:
             # Reset flag on error if we set it
             self.get_logger().error(f"Failed to publish pointcloud data: {e}")
