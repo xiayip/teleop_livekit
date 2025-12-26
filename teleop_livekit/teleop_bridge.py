@@ -9,7 +9,7 @@ import json
 from typing import Optional
 
 from livekit import rtc
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import Image, JointState, BatteryState
 from nav_msgs.msg import Odometry
 from std_msgs.msg import ByteMultiArray
 from geometry_msgs.msg import Pose
@@ -50,6 +50,9 @@ class TeleopBridge(LiveKitROS2BridgeBase):
         self._last_sent_joint_positions: Optional[list] = None
         self._joint_position_threshold = 0.001  # ~0.057 degrees
         
+        # Battery state feedback
+        self._last_sent_battery_percentage: Optional[float] = None
+        
         # Set up topic subscriptions
         self.setup_subscriptions()
         
@@ -77,6 +80,11 @@ class TeleopBridge(LiveKitROS2BridgeBase):
         
         self.joint_state_subscriber = self.create_subscription(
             JointState, '/joint_states', self.joint_state_callback,
+            qos_profile=rclpy.qos.QoSProfile(depth=1)
+        )
+        
+        self.battery_state_subscriber = self.create_subscription(
+            BatteryState, '/battery_state', self.battery_state_callback,
             qos_profile=rclpy.qos.QoSProfile(depth=1)
         )
         
@@ -284,3 +292,25 @@ class TeleopBridge(LiveKitROS2BridgeBase):
         )
         
         return position_delta >= self._joint_position_threshold
+    
+    def battery_state_callback(self, msg: BatteryState):
+        """
+        Send battery percentage to LiveKit with:
+        - Time-based throttling (1 Hz max)
+        - Change detection (only send if percentage changed)
+        """
+        try:
+            # Change detection - only send if percentage changed
+            if self._last_sent_battery_percentage is not None:
+                if msg.percentage - self._last_sent_battery_percentage < 0.01:
+                    return
+            # Update state and send only percentage
+            self._last_sent_battery_percentage = msg.percentage
+            self._submit_to_loop(self.send_feedback({
+                'packetType': 'ros2_message',
+                'topicName': '/battery_state',
+                'messageType': 'sensor_msgs/msg/BatteryState',
+                'data': {'percentage': msg.percentage}
+            }))
+        except Exception as e:
+            self.get_logger().error(f"Failed to send battery state: {e}")
