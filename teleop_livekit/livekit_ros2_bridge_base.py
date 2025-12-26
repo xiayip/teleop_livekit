@@ -294,12 +294,10 @@ class LiveKitROS2BridgeBase(Node):
             # Wait for action server to be available
             if not client.wait_for_server(timeout_sec=5.0):
                 self.get_logger().error(f"Action server {action_name} not available")
-                self._submit_to_loop(self.send_feedback({
-                    'packetType': 'ros2_action_response',
-                    'goalId': goal_id,
-                    'status': 'server_not_available',
-                    'message': f'Action server {action_name} not available'
-                }))
+                self.send_action_response_to_remote(
+                    goal_id, 'server_not_available',
+                    f'Action server {action_name} not available'
+                )
                 return
             
             # Create goal
@@ -323,17 +321,61 @@ class LiveKitROS2BridgeBase(Node):
     
     # ========== ROS2 -> LiveKit Publishing ==========
     
-    async def send_feedback(self, feedback_data: Dict[str, Any]):
-        """Send feedback to LiveKit (override for custom formatting)"""
+    async def _send_to_remote(self, data: Dict[str, Any]):
+        """Send data to LiveKit remote participants (internal)"""
         try:
-            json_str = json.dumps(feedback_data)
+            json_str = json.dumps(data)
             await self.room.local_participant.publish_data(json_str.encode('utf-8'))
         except Exception as e:
-            self.get_logger().error(f"Failed to send feedback: {e}")
+            self.get_logger().error(f"Failed to send to remote: {e}")
     
-    def publish_to_livekit(self, packet_data: Dict[str, Any]):
-        """Publish data packet to LiveKit from ROS callback"""
-        self._submit_to_loop(self.send_feedback(packet_data))
+    def send_msg_to_remote(self, topic_name: str, message_type: str, data: Dict[str, Any]):
+        """Send ROS2 message to remote participants"""
+        self._submit_to_loop(self._send_to_remote({
+            'packetType': 'ros2_message',
+            'topicName': topic_name,
+            'messageType': message_type,
+            'data': data
+        }))
+    
+    def send_service_response_to_remote(self, request_id: str, service_name: str, response: Dict[str, Any]):
+        """Send service response to remote participants"""
+        self._submit_to_loop(self._send_to_remote({
+            'packetType': 'ros2_service_response',
+            'requestId': request_id,
+            'serviceName': service_name,
+            'response': response
+        }))
+    
+    def send_action_response_to_remote(self, goal_id: str, status: str, message: str):
+        """Send action goal response to remote participants"""
+        self._submit_to_loop(self._send_to_remote({
+            'packetType': 'ros2_action_response',
+            'goalId': goal_id,
+            'status': status,
+            'message': message
+        }))
+    
+    def send_action_feedback_to_remote(self, goal_id: str, feedback: str):
+        """Send action feedback to remote participants"""
+        self._submit_to_loop(self._send_to_remote({
+            'packetType': 'ros2_action_feedback',
+            'goalId': goal_id,
+            'feedback': feedback
+        }))
+    
+    def send_action_result_to_remote(self, goal_id: str, status: str, result: str = None, message: str = None):
+        """Send action result to remote participants"""
+        data = {
+            'packetType': 'ros2_action_result',
+            'goalId': goal_id,
+            'status': status
+        }
+        if result is not None:
+            data['result'] = result
+        if message is not None:
+            data['message'] = message
+        self._submit_to_loop(self._send_to_remote(data))
     
     # ========== Large Payload Handling (Chunked Transfer) ==========
     
@@ -431,13 +473,9 @@ class LiveKitROS2BridgeBase(Node):
         try:
             response = future.result()
             response_json = ROS2MessageFactory.message_to_json(response)
-            
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_service_response',
-                'requestId': request_id,
-                'serviceName': service_name,
-                'response': json.loads(response_json)
-            }))
+            self.send_service_response_to_remote(
+                request_id, service_name, json.loads(response_json)
+            )
         except Exception as e:
             self.get_logger().error(f"Service call failed: {e}")
 
@@ -445,12 +483,7 @@ class LiveKitROS2BridgeBase(Node):
         """Action feedback callback"""
         try:
             self.get_logger().info(f"Action feedback for goal {goal_id}: {feedback_msg.feedback}")
-            # Send feedback to LiveKit
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_action_feedback',
-                'goalId': goal_id,
-                'feedback': str(feedback_msg.feedback)
-            }))
+            self.send_action_feedback_to_remote(goal_id, str(feedback_msg.feedback))
         except Exception as e:
             self.get_logger().error(f"Error in action feedback callback: {e}")
     
@@ -461,12 +494,9 @@ class LiveKitROS2BridgeBase(Node):
             goal_handle = future.result()
             if not goal_handle.accepted:
                 self.get_logger().info(f"Goal {goal_id} rejected")
-                self._submit_to_loop(self.send_feedback({
-                    'packetType': 'ros2_action_response',
-                    'goalId': goal_id,
-                    'status': 'rejected',
-                    'message': 'Goal was rejected by action server'
-                }))
+                self.send_action_response_to_remote(
+                    goal_id, 'rejected', 'Goal was rejected by action server'
+                )
                 return
             
             self.get_logger().info(f"Goal {goal_id} accepted")
@@ -474,12 +504,9 @@ class LiveKitROS2BridgeBase(Node):
             self.action_goal_handles[goal_id] = goal_handle
             
             # Send acceptance feedback
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_action_response',
-                'goalId': goal_id,
-                'status': 'accepted',
-                'message': 'Goal accepted by action server'
-            }))
+            self.send_action_response_to_remote(
+                goal_id, 'accepted', 'Goal accepted by action server'
+            )
             
             # Wait for result
             get_result_future = goal_handle.get_result_async()
@@ -489,12 +516,7 @@ class LiveKitROS2BridgeBase(Node):
             
         except Exception as e:
             self.get_logger().error(f"Error in action goal response callback: {e}")
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_action_response',
-                'goalId': goal_id,
-                'status': 'error',
-                'message': str(e)
-            }))
+            self.send_action_response_to_remote(goal_id, 'error', str(e))
     
     def _handle_action_result(self, future, goal_id: str):
         """Action result callback"""
@@ -507,17 +529,7 @@ class LiveKitROS2BridgeBase(Node):
                 del self.action_goal_handles[goal_id]
             
             # Send result to LiveKit
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_action_result',
-                'goalId': goal_id,
-                'status': 'succeeded',
-                'result': str(result.result)
-            }))
+            self.send_action_result_to_remote(goal_id, 'succeeded', result=str(result.result))
         except Exception as e:
             self.get_logger().error(f"Error in action result callback: {e}")
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_action_result',
-                'goalId': goal_id,
-                'status': 'error',
-                'message': str(e)
-            }))
+            self.send_action_result_to_remote(goal_id, 'error', message=str(e))

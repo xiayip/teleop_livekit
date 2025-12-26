@@ -195,12 +195,7 @@ class TeleopBridge(LiveKitROS2BridgeBase):
             self._last_sent_pose = pose_msg
             
             json_str = ROS2MessageFactory.message_to_json(pose_msg)
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_message',
-                'topicName': '/pose',
-                'messageType': 'geometry_msgs/msg/Pose',
-                'data': json.loads(json_str)
-            }))
+            self.send_msg_to_remote('/pose', 'geometry_msgs/msg/Pose', json.loads(json_str))
             
         except Exception as e:
             self.get_logger().error(f"Failed to send odometry: {e}")
@@ -256,13 +251,7 @@ class TeleopBridge(LiveKitROS2BridgeBase):
             self._last_sent_joint_positions = list(filtered_state.position)
             
             json_str = ROS2MessageFactory.message_to_json(filtered_state)
-            
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_message',
-                'topicName': '/joint_states',
-                'messageType': 'sensor_msgs/msg/JointState',
-                'data': json.loads(json_str)
-            }))
+            self.send_msg_to_remote('/joint_states', 'sensor_msgs/msg/JointState', json.loads(json_str))
             
         except Exception as e:
             self.get_logger().error(f"Failed to send joint state: {e}")
@@ -306,11 +295,9 @@ class TeleopBridge(LiveKitROS2BridgeBase):
                     return
             # Update state and send only percentage
             self._last_sent_battery_percentage = msg.percentage
-            self._submit_to_loop(self.send_feedback({
-                'packetType': 'ros2_message',
-                'topicName': '/battery_state',
-                'messageType': 'sensor_msgs/msg/BatteryState',
-                'data': {'percentage': msg.percentage}
-            }))
+            self.send_msg_to_remote(
+                '/battery_state', 'sensor_msgs/msg/BatteryState',
+                {'percentage': msg.percentage}
+            )
         except Exception as e:
             self.get_logger().error(f"Failed to send battery state: {e}")
