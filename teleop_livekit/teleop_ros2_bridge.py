@@ -15,14 +15,7 @@ from geometry_msgs.msg import Pose
 import rclpy.qos
 
 from .rtc_interface import RTCInterface, VideoFrame, VideoBufferType, VideoEncodingConfig, VideoCodec
-from .livekit_ros2_bridge_base import RTCROS2BridgeBase, ROS2MessageFactory
-
-# For backward compatibility
-try:
-    from livekit import rtc as livekit_rtc
-except ImportError:
-    livekit_rtc = None
-
+from .rtc_ros2_bridge_base import RTCROS2BridgeBase, ROS2MessageFactory
 
 class TeleopBridge(RTCROS2BridgeBase):
     """

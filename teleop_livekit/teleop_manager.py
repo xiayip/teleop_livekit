@@ -7,10 +7,10 @@ import asyncio
 import threading
 from typing import Optional, Dict, Any
 
-from livekit import rtc
 import rclpy
 
-from .teleop_bridge import TeleopBridge
+from .rtc_interface import RTCInterface
+from .teleop_ros2_bridge import TeleopBridge
 
 
 class TeleopManager:
@@ -24,7 +24,7 @@ class TeleopManager:
     def __init__(self, livekit_url: str, livekit_token: str):
         self.livekit_url = livekit_url
         self.livekit_token = livekit_token
-        self.room: Optional[rtc.Room] = None
+        self.rtc: Optional[RTCInterface] = None
         self.bridge: Optional[TeleopBridge] = None
         self.ros_thread: Optional[threading.Thread] = None
         self.running = False
@@ -35,12 +35,14 @@ class TeleopManager:
             # Initialize ROS2
             rclpy.init()
             
-            # Connect to LiveKit room
-            self.room = rtc.Room()
-            await self.room.connect(self.livekit_url, self.livekit_token)
+            # Create and connect RTC
+            from .livekit_rtc import LiveKitRTC
+            self.rtc = LiveKitRTC()
             
-            # Create teleop bridge node
-            self.bridge = TeleopBridge(self.room)
+            await self.rtc.connect(self.livekit_url, self.livekit_token)
+            
+            # Create teleop bridge node with RTC wrapper
+            self.bridge = TeleopBridge(self.rtc)
             
             # Start ROS2 spinning thread
             self.running = True
@@ -75,9 +77,9 @@ class TeleopManager:
         if self.bridge:
             self.bridge.destroy_node()
         
-        # Disconnect from LiveKit
-        if self.room:
-            await self.room.disconnect()
+        # Disconnect from RTC
+        if self.rtc:
+            await self.rtc.disconnect()
         
         # Shutdown ROS
         if rclpy.ok():

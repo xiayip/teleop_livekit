@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-LiveKit ROS2 Bridge Base - Generic bidirectional bridge between LiveKit and ROS2
+RTC ROS2 Bridge Base - Generic bidirectional bridge between RTC and ROS2
 Provides generic infrastructure for:
-- ROS2 message <-> LiveKit data packet conversion
+- ROS2 message <-> RTC data packet conversion
 - Dynamic topic publishing/subscribing
 - Service and action client support
+
+Supports multiple RTC backends via RTCInterface abstraction.
 """
 
 import asyncio
 import json
 import time
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Union
 from dataclasses import dataclass
-import threading
 import importlib
 
-# LiveKit imports
-from livekit import rtc
+# RTC interface imports
+from .rtc_interface import RTCInterface, DataPacket, Participant
 
 # ROS2 imports
 import rclpy
@@ -142,12 +143,12 @@ class PublisherInfo:
     created_time: float
 
 
-class LiveKitROS2BridgeBase(Node):
+class RTCROS2BridgeBase(Node):
     """
-    Base class for LiveKit-ROS2 bridge providing generic bidirectional communication.
+    Base class for RTC-ROS2 bridge providing generic bidirectional communication.
     
     Handles:
-    - LiveKit data packet reception and routing
+    - RTC data packet reception and routing
     - Dynamic ROS2 publisher/subscriber creation
     - ROS2 service and action client management
     - Message serialization/deserialization
@@ -157,14 +158,24 @@ class LiveKitROS2BridgeBase(Node):
     - Custom callback methods for business logic
     """
     
-    def __init__(self, room: rtc.Room, node_name: str = 'livekit_ros2_bridge'):
+    def __init__(self, rtc: RTCInterface, node_name: str = 'rtc_ros2_bridge'):
+        """
+        Initialize RTC ROS2 Bridge.
+        
+        Args:
+            rtc: RTCInterface implementation
+            node_name: ROS2 node name
+        """
         super().__init__(node_name)
         
-        # LiveKit setup
-        self.room = room
-        self.room.on("data_received", self.on_data_received)
-        self.room.on("participant_connected", self._on_participant_connected)
-        self.room.on("participant_disconnected", self._on_participant_disconnected)
+        # RTC setup - handle both RTCInterface and legacy LiveKit Room
+        if isinstance(rtc, RTCInterface):
+            self._rtc = rtc
+        
+        # Register event handlers
+        self._rtc.on_data_received(self._on_data_received)
+        self._rtc.on_participant_connected(self._on_participant_connected)
+        self._rtc.on_participant_disconnected(self._on_participant_disconnected)
         
         # ROS2 infrastructure
         self._topic_publishers: Dict[str, PublisherInfo] = {}
@@ -179,7 +190,7 @@ class LiveKitROS2BridgeBase(Node):
             depth=10
         )
         
-        # AsyncIO loop for LiveKit operations
+        # AsyncIO loop for RTC operations
         try:
             self._asyncio_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -188,13 +199,18 @@ class LiveKitROS2BridgeBase(Node):
         # Statistics
         self.error_count = 0
         
-        self.get_logger().info(f"LiveKit ROS2 Bridge Base initialized: {node_name}")
+        self.get_logger().info(f"RTC ROS2 Bridge Base initialized: {node_name}")
     
-    def _on_participant_connected(self, participant):
+    @property
+    def rtc(self) -> RTCInterface:
+        """Get the RTC interface"""
+        return self._rtc
+    
+    def _on_participant_connected(self, participant: Participant):
         """Handle participant connection"""
         self.get_logger().info(f"Participant connected: {participant.identity}")
     
-    def _on_participant_disconnected(self, participant):
+    def _on_participant_disconnected(self, participant: Participant):
         """Handle participant disconnection"""
         self.get_logger().info(f"Participant disconnected: {participant.identity}")
     
@@ -215,10 +231,10 @@ class LiveKitROS2BridgeBase(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to submit coroutine: {e}")
     
-    # ========== LiveKit Data Reception ==========
+    # ========== RTC Data Reception ==========
     
-    def on_data_received(self, data: rtc.DataPacket):
-        """Handle incoming LiveKit data packets"""
+    def _on_data_received(self, data: DataPacket):
+        """Handle incoming RTC data packets"""
         try:
             packet = json.loads(data.data.decode('utf-8'))
             packet_type = packet.get('packetType', '')
@@ -319,13 +335,13 @@ class LiveKitROS2BridgeBase(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to send action goal: {e}")
     
-    # ========== ROS2 -> LiveKit Publishing ==========
+    # ========== ROS2 -> RTC Publishing ==========
     
     async def _send_to_remote(self, data: Dict[str, Any]):
-        """Send data to LiveKit remote participants (internal)"""
+        """Send data to RTC remote participants (internal)"""
         try:
             json_str = json.dumps(data)
-            await self.room.local_participant.publish_data(json_str.encode('utf-8'))
+            await self._rtc.publish_data(json_str.encode('utf-8'))
         except Exception as e:
             self.get_logger().error(f"Failed to send to remote: {e}")
     
@@ -387,9 +403,9 @@ class LiveKitROS2BridgeBase(Node):
         chunk_size: int = 50000,
         on_done: Optional[Callable[[Optional[Exception]], None]] = None
     ):
-        """Send bytes payload across LiveKit data channel safely from the ROS thread."""
+        """Send bytes payload across RTC data channel safely from the ROS thread."""
         if self._asyncio_loop is None:
-            self.get_logger().error("No asyncio event loop available for LiveKit publish")
+            self.get_logger().error("No asyncio event loop available for RTC publish")
             return
         def _publish_chunks():
             async def _do_publish():
@@ -401,8 +417,8 @@ class LiveKitROS2BridgeBase(Node):
                         "chunk": idx // chunk_size,
                         "total": total_chunks,
                     }).encode("utf-8")
-                    await self.room.local_participant.publish_data(metadata, topic=f"{topic}:meta")
-                    await self.room.local_participant.publish_data(chunk, topic=topic)
+                    await self._rtc.publish_data(metadata, topic=f"{topic}:meta")
+                    await self._rtc.publish_data(chunk, topic=topic)
             return _do_publish()
         future = asyncio.run_coroutine_threadsafe(_publish_chunks(), self._asyncio_loop)
         def _done_cb(f: asyncio.Future):
@@ -411,7 +427,7 @@ class LiveKitROS2BridgeBase(Node):
                 f.result()
             except Exception as e:
                 exc = e
-                self.get_logger().error(f"Failed to publish LiveKit data on topic '{topic}': {e}")
+                self.get_logger().error(f"Failed to publish RTC data on topic '{topic}': {e}")
             if on_done is not None:
                 try:
                     on_done(exc)
@@ -528,7 +544,7 @@ class LiveKitROS2BridgeBase(Node):
             if goal_id in self.action_goal_handles:
                 del self.action_goal_handles[goal_id]
             
-            # Send result to LiveKit
+            # Send result to RTC
             self.send_action_result_to_remote(goal_id, 'succeeded', result=str(result.result))
         except Exception as e:
             self.get_logger().error(f"Error in action result callback: {e}")
